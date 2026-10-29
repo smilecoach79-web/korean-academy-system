@@ -305,9 +305,9 @@ elif menu == "성적 및 국어 평가 입력":
                     
                     st.markdown("##### 📝 통합 국어 영역별 세부 득점")
                     c_sc1, c_sc2, c_sc3 = st.columns(3)
-                    reading_sc = c_sc1.number_input("독서 점수", min_value=0.0, max_value=50.0, value=35.0, step=0.5)
-                    literature_sc = c_sc2.number_input("문학 점수", min_value=0.0, max_value=50.0, value=35.0, step=0.5)
-                    grammar_sc = c_sc3.number_input("문법·어휘/화법 점수", min_value=0.0, max_value=50.0, value=20.0, step=0.5)
+                    reading_sc = c_sc1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=35.0, step=0.5)
+                    literature_sc = c_sc2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=35.0, step=0.5)
+                    grammar_sc = c_sc3.number_input("문법·어휘/화법 점수", min_value=0.0, max_value=100.0, value=20.0, step=0.5)
                     
                     calc_total = reading_sc + literature_sc + grammar_sc
                     st.info(f"💡 자동 합산 총점: **{calc_total:.1f}점**")
@@ -359,9 +359,9 @@ elif menu == "성적 및 국어 평가 입력":
                     with st.form("score_edit_form"):
                         ed_category = st.text_input("평가 회차명", value=target_row['category'])
                         c_ed1, c_ed2, c_ed3 = st.columns(3)
-                        ed_read = c_ed1.number_input("독서 점수", min_value=0.0, max_value=50.0, value=float(target_row['reading_score'] or 0.0), step=0.5)
-                        ed_lit = c_ed2.number_input("문학 점수", min_value=0.0, max_value=50.0, value=float(target_row['literature_score'] or 0.0), step=0.5)
-                        ed_gram = c_ed3.number_input("문법/화법 점수", min_value=0.0, max_value=50.0, value=float(target_row['grammar_score'] or 0.0), step=0.5)
+                        ed_read = c_ed1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=float(target_row['reading_score'] or 0.0), step=0.5)
+                        ed_lit = c_ed2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=float(target_row['literature_score'] or 0.0), step=0.5)
+                        ed_gram = c_ed3.number_input("문법/화법 점수", min_value=0.0, max_value=100.0, value=float(target_row['grammar_score'] or 0.0), step=0.5)
                         
                         ed_total = ed_read + ed_lit + ed_gram
                         st.caption(f"수정 후 자동 계산 총점: {ed_total:.1f}점")
