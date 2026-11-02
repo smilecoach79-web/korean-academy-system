@@ -137,14 +137,80 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
 if not st.session_state.logged_in:
-    st.title("🔒 국어 학원 관리 시스템 로그인")
-    input_pw = st.text_input("관리자 비밀번호를 입력하세요", type="password")
-    if st.button("로그인"):
-        if input_pw == ADMIN_PW:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 올바르지 않습니다.")
+    # [수정 17] 로그인 화면: 가운데 카드 형태로 정돈
+    st.markdown("""
+    <style>
+    /* 로그인 화면에서는 사이드바 숨기고 배경을 은은하게 */
+    section[data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none; }
+    [data-testid="stApp"] { background: linear-gradient(160deg, #fff5f5 0%, #f4f6fb 45%, #eef1f8 100%); }
+    /* 가운데 카드 (신버전/구버전 Streamlit 모두) */
+    [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .login-head),
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.login-head) {
+        background: #ffffff;
+        border-radius: 20px !important;
+        border: 1px solid #e3e6ee !important;
+        box-shadow: 0 18px 40px rgba(30, 40, 70, 0.10), 0 2px 6px rgba(30, 40, 70, 0.05);
+        padding: 28px 24px 20px 24px !important;
+    }
+    .login-head { text-align: center; margin: 8px 0 4px 0; }
+    .login-logo {
+        width: 72px; height: 72px; margin: 0 auto 14px auto; border-radius: 20px;
+        display: flex; align-items: center; justify-content: center; font-size: 38px;
+        background: linear-gradient(180deg, #ff6b6b 0%, #e63c3c 100%);
+        box-shadow: 0 4px 0 #a82424, 0 8px 16px rgba(230, 60, 60, 0.30);
+    }
+    .login-title { font-size: 1.55rem; font-weight: 800; color: #262730; letter-spacing: -0.02em; }
+    .login-sub { font-size: 0.92rem; color: #808495; margin-top: 4px; }
+    .login-date {
+        display: inline-block; margin-top: 14px; padding: 5px 14px; border-radius: 999px;
+        background: #f1f3f8; color: #5f6475; font-size: 0.85rem;
+    }
+    .login-foot { text-align: center; color: #a3a8b8; font-size: 0.78rem; margin: 4px 0 2px 0; }
+    /* 로그인 버튼도 메뉴처럼 입체감 있게 */
+    [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .login-head) [data-testid="stFormSubmitButton"] button,
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.login-head) [data-testid="stFormSubmitButton"] button {
+        background: linear-gradient(180deg, #ff6b6b 0%, #e63c3c 100%);
+        border: 1px solid #c92f2f; color: #ffffff; font-weight: 700;
+        padding: 10px 0; border-radius: 12px;
+        box-shadow: 0 4px 0 #a82424, 0 6px 12px rgba(230, 60, 60, 0.25);
+        transition: transform 0.08s, box-shadow 0.08s;
+    }
+    [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .login-head) [data-testid="stFormSubmitButton"] button:active,
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.login-head) [data-testid="stFormSubmitButton"] button:active {
+        transform: translateY(3px); box-shadow: 0 1px 0 #a82424;
+    }
+    [data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] .login-head) [data-testid="stForm"],
+    [data-testid="stVerticalBlockBorderWrapper"]:has(.login-head) [data-testid="stForm"] { border: none; padding: 0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    t = today_kst()
+    st.write("")
+    st.write("")
+    _, mid, _ = st.columns([1, 1.15, 1])
+    with mid:
+        with st.container(border=True):
+            st.markdown(f"""
+            <div class="login-head">
+                <div class="login-logo">📚</div>
+                <div class="login-title">국어 관리 시스템</div>
+                <div class="login-sub">학생 · 출결 · 성적 · 상담을 한곳에서</div>
+                <div class="login-date">{t.strftime('%Y년 %m월 %d일')} ({WEEKDAYS[t.weekday()]})</div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.write("")
+            # 양식(form)으로 감싸서, 비밀번호 입력 후 Enter 키만 눌러도 로그인
+            with st.form("login_form", border=False):
+                input_pw = st.text_input("비밀번호", type="password", placeholder="관리자 비밀번호",
+                                         label_visibility="collapsed")
+                login_ok = st.form_submit_button("로그인", width="stretch")
+            if login_ok:
+                if input_pw == ADMIN_PW:
+                    st.session_state.logged_in = True
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 올바르지 않습니다.")
+            st.markdown("<div class='login-foot'>🔒 관리자 전용 · 학생 개인정보 보호</div>", unsafe_allow_html=True)
     st.stop()
 
 # ----------------- 본 프로그램 화면 -----------------
