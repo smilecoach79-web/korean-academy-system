@@ -111,6 +111,19 @@ def init_db():
         """))
         # 출결이 어느 반 수업인지 기록 (반을 지워도 출결 기록은 남도록 SET NULL)
         conn.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL;"))
+        # [수정 19] 수업 일지: 반 + 날짜마다 수업 내용, 과제, 제출일
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS lessons (
+                id SERIAL PRIMARY KEY,
+                class_id INTEGER REFERENCES classes (id) ON DELETE CASCADE,
+                lesson_date TEXT NOT NULL,
+                content TEXT,
+                homework TEXT,
+                due_date TEXT,
+                notes TEXT,
+                UNIQUE (class_id, lesson_date)
+            );
+        """))
     return True
 
 
@@ -218,7 +231,7 @@ if not st.session_state.logged_in:
 # [수정 1] 메뉴 이름을 상수로 두고, 아래 조건문에서도 같은 이름을 쓰도록 통일
 MENU_TODAY = "🏠  오늘"
 MENU_MEMBERS = "👥  구성원 등록/목록"
-MENU_ATT = "📅  출결 체크"
+MENU_ATT = "📅  출결·수업 기록"
 MENU_SCORE = "📝  성적 및 국어 평가"
 MENU_LOG = "💬  상담/소통 일지"
 MENU_PORTFOLIO = "👤  개인별 종합 조회"
@@ -285,6 +298,9 @@ section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) 
     color: #ffffff;
     font-weight: 700;
 }
+/* [수정 19] 한글이 단어 중간에서 줄바꿈되지 않도록 (예: '풀 / 어오기' 방지) */
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stCaptionContainer"] { word-break: keep-all; overflow-wrap: anywhere; }
 /* 메뉴 글자 크기 */
 section[data-testid="stSidebar"] [role="radiogroup"] p {
     font-size: 1.02rem;
@@ -378,8 +394,17 @@ if menu == MENU_TODAY:
         if today_classes.empty:
             st.info("오늘은 등록된 수업이 없습니다. '반·시간표 관리'에서 수업 시간을 등록하면 여기에 나타나요.")
         else:
+            # [수정 19] 반별 수업 기록: 오늘 기록 여부 + 지난 시간 과제
+            with engine.connect() as conn:
+                lesson_hist = pd.read_sql_query(text("""
+                    SELECT class_id, lesson_date, homework, due_date FROM lessons
+                    WHERE lesson_date <= :d ORDER BY lesson_date DESC
+                """), conn, params={"d": t_str})
             for r in today_classes.itertuples():
                 roster_ids = set(class_roster[class_roster["class_id"] == r.id]["member_id"])
+                my_ls = lesson_hist[lesson_hist["class_id"] == r.id]
+                logged_today = (my_ls["lesson_date"] == t_str).any()
+                prev_hw = my_ls[(my_ls["lesson_date"] < t_str) & (my_ls["homework"].fillna("").str.strip() != "")]
                 done = len(set(att_today[att_today["class_id"] == r.id]["member_id"])) if not att_today.empty else 0
                 with st.container(border=True):
                     a, b = st.columns([3, 1.3])
@@ -390,6 +415,10 @@ if menu == MENU_TODAY:
                         a.caption(f"학생 {len(roster_ids)}명 · ✅ 출결 완료")
                     else:
                         a.caption(f"학생 {len(roster_ids)}명 · 출결 {done}/{len(roster_ids)}명 입력")
+                    if not prev_hw.empty:
+                        h = prev_hw.iloc[0]
+                        a.markdown(md(f"📝 **지난 과제** ({h['lesson_date'][5:].replace('-', '/')} 수업): {h['homework']}"))
+                    a.caption("📖 오늘 수업 기록 ✅" if logged_today else "📖 오늘 수업 기록 아직 없음")
                     b.button("출결 입력 →", key=f"go_att_{r.id}_{r.start_time}",
                              on_click=go_class_attendance, args=(r.name,), width="stretch")
 
@@ -681,6 +710,86 @@ elif menu == MENU_ATT:
                             """), {"m": int(r["학생ID"]), "d": str(bdate), "s": r["출결"], "c": cid})
                     counts = edited["출결"].value_counts()
                     st.success(f"{cname} {bdate} 출결 저장 완료 · " + ", ".join(f"{k} {v}명" for k, v in counts.items()))
+
+            # ----- [수정 19] 수업 내용 · 과제 -----
+            st.markdown(f"#### 📖 {bdate.strftime('%m월 %d일')}({WEEKDAYS[bdate.weekday()]}) 수업 내용 · 과제")
+            with engine.connect() as conn:
+                cur_ls = pd.read_sql_query(text(
+                    "SELECT content, homework, due_date, notes FROM lessons WHERE class_id = :c AND lesson_date = :d"
+                ), conn, params={"c": cid, "d": str(bdate)})
+                past_ls = pd.read_sql_query(text("""
+                    SELECT lesson_date AS 날짜, content AS 수업내용, homework AS 과제, due_date AS 제출일, notes AS 메모
+                    FROM lessons WHERE class_id = :c ORDER BY lesson_date DESC LIMIT 30
+                """), conn, params={"c": cid})
+
+            # 과제 제출일 기본값: 이 반의 다음 수업 날짜
+            next_class = None
+            reg_days = set(int(w) for w in my_sched["weekday"]) if not my_sched.empty else set()
+            for k in range(1, 15):
+                d2 = bdate + timedelta(days=k)
+                if d2.weekday() in reg_days:
+                    next_class = d2
+                    break
+
+            has_ls = not cur_ls.empty
+            c_val = cur_ls.iloc[0] if has_ls else None
+            if has_ls:
+                st.caption("✅ 이 날짜에 저장된 수업 기록을 불러왔어요. 고친 뒤 저장하면 덮어씁니다.")
+            due_default = None
+            if has_ls and c_val["due_date"]:
+                try:
+                    due_default = datetime.strptime(c_val["due_date"], "%Y-%m-%d").date()
+                except ValueError:
+                    due_default = None
+            elif not has_ls:
+                due_default = next_class
+
+            with st.form(f"lesson_form_{cid}_{bdate}"):
+                l_content = st.text_area("수업 내용", value=(c_val["content"] or "") if has_ls else "",
+                                         placeholder="고전시가 – 관동별곡(정철) 서사·본사1 해석, 화자의 여정과 정서 변화", height=90)
+                l_hw = st.text_area("과제", value=(c_val["homework"] or "") if has_ls else "",
+                                    placeholder="관동별곡 기출 문제 풀어오기 (교재 p.45~52)", height=70)
+                f1, f2 = st.columns([1, 2])
+                l_due = f1.date_input("과제 제출일", value=due_default,
+                                      help="기본값은 이 반의 다음 수업 날짜예요. 과제가 없으면 비워 두세요.")
+                l_notes = f2.text_input("메모 (선택)", value=(c_val["notes"] or "") if has_ls else "",
+                                        placeholder="진도 덜 나감, 다음 시간 본사2부터")
+                g1, g2 = st.columns([1, 1])
+                save_ls = g1.form_submit_button("📖 수업 기록 저장", type="primary", width="stretch")
+                del_ls = False
+                if has_ls:
+                    confirm_ls_del = g2.checkbox("이 날짜 수업 기록 삭제")
+                    del_ls = g2.form_submit_button("기록 삭제")
+            if save_ls:
+                if not l_content.strip() and not l_hw.strip():
+                    st.warning("수업 내용이나 과제 중 하나는 입력해 주세요.")
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                            INSERT INTO lessons (class_id, lesson_date, content, homework, due_date, notes)
+                            VALUES (:c, :d, :ct, :hw, :due, :nt)
+                            ON CONFLICT (class_id, lesson_date)
+                            DO UPDATE SET content = EXCLUDED.content, homework = EXCLUDED.homework,
+                                          due_date = EXCLUDED.due_date, notes = EXCLUDED.notes
+                        """), {"c": cid, "d": str(bdate), "ct": l_content.strip(), "hw": l_hw.strip(),
+                               "due": str(l_due) if (l_due and l_hw.strip()) else None, "nt": l_notes.strip()})
+                    st.session_state["flash"] = f"📖 {cname} {bdate.strftime('%m/%d')} 수업 기록을 저장했어요."
+                    st.rerun()
+            if del_ls:
+                if not confirm_ls_del:
+                    st.warning("삭제하려면 '이 날짜 수업 기록 삭제'를 먼저 체크해 주세요.")
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM lessons WHERE class_id = :c AND lesson_date = :d"),
+                                     {"c": cid, "d": str(bdate)})
+                    st.session_state["flash"] = "🗑️ 수업 기록을 삭제했어요."
+                    st.rerun()
+
+            with st.expander(f"📚 {cname} 지난 수업 기록 ({len(past_ls)}회)"):
+                if past_ls.empty:
+                    st.caption("아직 저장된 수업 기록이 없습니다.")
+                else:
+                    st.dataframe(past_ls.fillna(""), hide_index=True, width="stretch")
 
         st.divider()
         col_att_add, col_att_edit = st.columns([1.2, 1])
@@ -1409,5 +1518,24 @@ elif menu == MENU_BACKUP:
         label="📥 반·시간표 CSV 다운로드",
         data=csv_bytes(df_exp_classes),
         file_name=f"국어학원_반시간표_{today_kst()}.csv",
+        mime="text/csv"
+    )
+
+    st.divider()
+
+    # [수정 19] 수업 일지 백업
+    st.subheader("6️⃣ 수업 일지 (수업 내용 · 과제)")
+    with engine.connect() as conn:
+        df_exp_lessons = pd.read_sql_query("""
+            SELECT l.lesson_date AS 수업일, c.name AS 반이름, l.content AS 수업내용,
+                   l.homework AS 과제, l.due_date AS 제출일, l.notes AS 메모
+            FROM lessons l JOIN classes c ON c.id = l.class_id
+            ORDER BY l.lesson_date DESC, c.name
+        """, conn)
+    st.dataframe(df_exp_lessons.fillna(""), hide_index=True, width="stretch")
+    st.download_button(
+        label="📥 수업 일지 CSV 다운로드",
+        data=csv_bytes(df_exp_lessons),
+        file_name=f"국어학원_수업일지_{today_kst()}.csv",
         mime="text/csv"
     )
