@@ -80,20 +80,20 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ----------------- 본 프로그램 화면 -----------------
-st.title("📚 국어 종합 관리 시스템 (클라우드 연동)")
+st.title("📚 국어 종합 관리 시스템")
 
-menu = st.sidebar.selectbox("메뉴 선택", [
-    "구성원 등록/목록", 
-    "출결 체크", 
-    "성적 및 국어 평가 입력", 
-    "상담/소통 일지", 
-    "개인별 종합 조회", 
-    "💾 데이터 백업 (CSV/엑셀)"
+menu = st.sidebar.radio("메뉴 선택", [
+    "구성원 등록/목록",
+    "출결 체크",
+    "성적 및 국어 평가 입력",
+    "상담/소통 일지",
+    "개인별 종합 조회",
+    "데이터 백업 (CSV/엑셀)"
 ])
 
 # 1. 구성원 등록 및 목록
 if menu == "구성원 등록/목록":
-    st.header("1. 학생 관리")
+    st.header("👥 구성원 등록 및 목록")
     col_add, col_edit, col_del = st.columns([1, 1, 1])
     
     with col_add:
@@ -122,7 +122,7 @@ if menu == "구성원 등록/목록":
             if m_list_edit.empty:
                 st.info("등록된 학생이 없습니다.")
             else:
-                edit_options = {f"[ID:{row['id']}] {row['name']} ({row['group_name']})": row['id'] for _, row in m_list_edit.iterrows()}
+                edit_options ={f"{row['name']} ({row['group_name']})": row['id'] for _, row in m_list_edit.iterrows()}
                 target_edit_label = st.selectbox("수정할 대상 선택", list(edit_options.keys()), key="edit_selector")
                 target_edit_id = edit_options[target_edit_label]
 
@@ -146,33 +146,43 @@ if menu == "구성원 등록/목록":
                         st.success(f"'{edit_name}' 학생 정보가 수정되었습니다.")
                         st.rerun()
 
-    with col_del:
-        with st.expander("🗑️ 학생 삭제 (퇴원/중복 정리)", expanded=False):
+   	with col_del:
+            with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
             with engine.connect() as conn:
-                m_list = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY id ASC", conn)
-            
-            if m_list.empty:
-                st.info("등록된 인원이 없습니다.")
-            else:
-                del_options = {f"[ID:{row['id']}] {row['name']} ({row['group_name']})": row['id'] for _, row in m_list.iterrows()}
-                target_del = st.selectbox("삭제할 대상 선택", list(del_options.keys()), key="del_selector")
-                
-                confirm_del = st.checkbox("선택한 학생의 모든 기록을 영구 삭제합니다.")
-                if st.button("영구 삭제 실행", type="primary"):
-                    if confirm_del:
-                        del_id = del_options[target_del]
-                        with engine.begin() as conn:
-                            conn.execute(text("DELETE FROM members WHERE id = :id"), {"id": del_id})
-                        st.success(f"'{target_del}' 정보가 완전히 삭제되었습니다.")
-                        st.rerun()
-                    else:
-                        st.warning("확인 체크박스를 체크한 후 삭제 버튼을 눌러주세요.")
+            m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
+
+        if m_list.empty:
+            st.info("등록된 인원이 없습니다.")
+        else:
+            del_options = {
+                f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']})": row['id']
+                for _, row in m_list.iterrows()
+            }
+            target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
+            target_id = del_options[target_del_label]
+
+            st.caption("※ 퇴원 처리해도 과거 성적, 출결, 상담 기록은 안전하게 보존됩니다.")
+            col_b1, col_b2 = st.columns(2)
+
+            with col_b1:
+                if st.button("🚫 '퇴원' 처리", use_container_width=True):
+                    with engine.begin() as conn:
+                        conn.execute(text("UPDATE members SET status = '퇴원' WHERE id = :id"), {"id": target_id})
+                    st.warning("퇴원 처리되었습니다. 메인 목록에서 숨겨집니다.")
+                    st.rerun()
+
+            with col_b2:
+                if st.button("🔄 '재원' 복원", use_container_width=True):
+                    with engine.begin() as conn:
+                        conn.execute(text("UPDATE members SET status = '재원' WHERE id = :id"), {"id": target_id})
+                    st.success("재원생으로 다시 복원되었습니다.")
+                    st.rerun()
 
     st.divider()
     st.subheader("📋 전체 학생 명단 검색 및 조회")
     
     with engine.connect() as conn:
-        df_members_raw = pd.read_sql_query("SELECT id AS ID, name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 기본메모 FROM members ORDER BY id ASC", conn)
+        df_members_raw = pd.read_sql_query("SELECT id AS ID, name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 기본메모 FROM members WHERE status = '재원' OR status IS NULL ORDER BY id ASC", conn)
 
     if df_members_raw.empty:
         st.info("등록된 학생이 없습니다. 새 학생을 등록해 보세요.")
