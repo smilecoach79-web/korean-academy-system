@@ -13,8 +13,18 @@ except Exception:
     st.error("보안 설정(secrets.toml)을 찾을 수 없습니다. .streamlit/secrets.toml 파일을 확인해 주세요.")
     st.stop()
 
-engine = create_engine(DB_URL)
 
+# [수정 5] 화면을 누를 때마다 DB 연결을 새로 만들지 않도록, 연결은 한 번만 만들어 재사용
+@st.cache_resource
+def get_engine():
+    return create_engine(DB_URL, pool_pre_ping=True)
+
+
+engine = get_engine()
+
+
+# [수정 5] 테이블 확인도 앱이 처음 켜질 때 한 번만 실행
+@st.cache_resource
 def init_db():
     with engine.begin() as conn:
         # 1. 학생 테이블
@@ -24,9 +34,13 @@ def init_db():
                 name TEXT NOT NULL,
                 group_name TEXT,
                 contact TEXT,
-                notes TEXT
+                notes TEXT,
+                status TEXT DEFAULT '재원'
             );
         """))
+        # [수정 2] 이미 만들어진 테이블에도 재원/퇴원(status) 칸이 없으면 추가
+        conn.execute(text("ALTER TABLE members ADD COLUMN IF NOT EXISTS status TEXT DEFAULT '재원';"))
+
         # 2. 출결 테이블
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS attendance (
@@ -61,8 +75,13 @@ def init_db():
                 details TEXT
             );
         """))
+    return True
+
 
 init_db()
+
+# [수정 4] 입력 화면(출결·성적·상담)에서 쓸 '재원생만' 조건
+ACTIVE_ONLY = "WHERE status = '재원' OR status IS NULL"
 
 # ----------------- 관리자 로그인 보안 -----------------
 if "logged_in" not in st.session_state:
@@ -82,20 +101,23 @@ if not st.session_state.logged_in:
 # ----------------- 본 프로그램 화면 -----------------
 st.title("📚 국어 종합 관리 시스템")
 
+# [수정 1] 메뉴 이름을 상수로 두고, 아래 조건문에서도 같은 이름을 쓰도록 통일
+MENU_MEMBERS = "구성원 등록/목록"
+MENU_ATT = "출결 체크"
+MENU_SCORE = "성적 및 국어 평가 입력"
+MENU_LOG = "상담/소통 일지"
+MENU_PORTFOLIO = "개인별 종합 조회"
+MENU_BACKUP = "데이터 백업 (CSV/엑셀)"
+
 menu = st.sidebar.radio("메뉴 선택", [
-    "구성원 등록/목록",
-    "출결 체크",
-    "성적 및 국어 평가 입력",
-    "상담/소통 일지",
-    "개인별 종합 조회",
-    "데이터 백업 (CSV/엑셀)"
+    MENU_MEMBERS, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO, MENU_BACKUP
 ])
 
 # 1. 구성원 등록 및 목록
-if menu == "구성원 등록/목록":
+if menu == MENU_MEMBERS:
     st.header("👥 구성원 등록 및 목록")
     col_add, col_edit, col_del = st.columns([1, 1, 1])
-    
+
     with col_add:
         with st.expander("➕ 새 학생 등록", expanded=False):
             with st.form("add_member_form"):
@@ -104,12 +126,12 @@ if menu == "구성원 등록/목록":
                 contact = st.text_input("연락처")
                 notes = st.text_input("기본 메모 (취약 영역, 목표 등급/대학)")
                 submit = st.form_submit_button("등록하기")
-                
+
                 if submit and name:
                     with engine.begin() as conn:
                         conn.execute(text("""
-                            INSERT INTO members (name, group_name, contact, notes)
-                            VALUES (:name, :group_name, :contact, :notes)
+                            INSERT INTO members (name, group_name, contact, notes, status)
+                            VALUES (:name, :group_name, :contact, :notes, '재원')
                         """), {"name": name, "group_name": group_name, "contact": contact, "notes": notes})
                     st.success(f"'{name}' 학생이 클라우드 DB에 등록되었습니다.")
                     st.rerun()
@@ -118,11 +140,11 @@ if menu == "구성원 등록/목록":
         with st.expander("✏️ 학생 정보 수정", expanded=False):
             with engine.connect() as conn:
                 m_list_edit = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY id ASC", conn)
-            
+
             if m_list_edit.empty:
                 st.info("등록된 학생이 없습니다.")
             else:
-                edit_options ={f"{row['name']} ({row['group_name']})": row['id'] for _, row in m_list_edit.iterrows()}
+                edit_options = {f"{row['name']} ({row['group_name']}) · ID {row['id']}": row['id'] for _, row in m_list_edit.iterrows()}
                 target_edit_label = st.selectbox("수정할 대상 선택", list(edit_options.keys()), key="edit_selector")
                 target_edit_id = edit_options[target_edit_label]
 
@@ -139,7 +161,7 @@ if menu == "구성원 등록/목록":
                     if submit_edit and edit_name:
                         with engine.begin() as conn:
                             conn.execute(text("""
-                                UPDATE members 
+                                UPDATE members
                                 SET name = :name, group_name = :group_name, contact = :contact, notes = :notes
                                 WHERE id = :id
                             """), {"name": edit_name, "group_name": edit_group, "contact": edit_contact, "notes": edit_notes, "id": target_edit_id})
@@ -154,9 +176,9 @@ if menu == "구성원 등록/목록":
             if m_list.empty:
                 st.info("등록된 인원이 없습니다.")
             else:
-                # ID 번호는 가리고 상태와 이름만 단정하게 표시
+                # 동명이인 구분을 위해 ID를 함께 표시
                 del_options = {
-                    f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']})": row['id']
+                    f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']}) · ID {row['id']}": row['id']
                     for _, row in m_list.iterrows()
                 }
                 target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
@@ -166,14 +188,14 @@ if menu == "구성원 등록/목록":
                 col_b1, col_b2 = st.columns(2)
 
                 with col_b1:
-                    if st.button("🚫 '퇴원' 처리", use_container_width=True):
+                    if st.button("🚫 '퇴원' 처리", width="stretch"):
                         with engine.begin() as conn:
                             conn.execute(text("UPDATE members SET status = '퇴원' WHERE id = :id"), {"id": target_id})
                         st.warning("퇴원 처리되었습니다. 메인 목록에서 숨겨집니다.")
                         st.rerun()
 
                 with col_b2:
-                    if st.button("🔄 '재원' 복원", use_container_width=True):
+                    if st.button("🔄 '재원' 복원", width="stretch"):
                         with engine.begin() as conn:
                             conn.execute(text("UPDATE members SET status = '재원' WHERE id = :id"), {"id": target_id})
                         st.success("재원생으로 다시 복원되었습니다.")
@@ -181,9 +203,12 @@ if menu == "구성원 등록/목록":
 
     st.divider()
     st.subheader("📋 전체 학생 명단 검색 및 조회")
-    
+
     with engine.connect() as conn:
-        df_members_raw = pd.read_sql_query("SELECT id AS ID, name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 기본메모 FROM members WHERE status = '재원' OR status IS NULL ORDER BY id ASC", conn)
+        df_members_raw = pd.read_sql_query(f"""
+            SELECT id AS "ID", name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 기본메모
+            FROM members {ACTIVE_ONLY} ORDER BY id ASC
+        """, conn)
 
     if df_members_raw.empty:
         st.info("등록된 학생이 없습니다. 새 학생을 등록해 보세요.")
@@ -204,13 +229,14 @@ if menu == "구성원 등록/목록":
             ]
 
         st.caption(f"검색 결과: 총 **{len(filtered_df)}명** / 전체 {len(df_members_raw)}명")
-        st.dataframe(filtered_df, use_container_width=True)
+        st.dataframe(filtered_df, width="stretch")
 
 # 2. 출결 체크
-elif menu == "출결 체크":
+elif menu == MENU_ATT:
     st.header("2. 출석 및 수업 참여 관리")
     with engine.connect() as conn:
-        members = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY name ASC", conn)
+        # [수정 4] 퇴원생은 입력 목록에서 제외
+        members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
 
     if members.empty:
         st.warning("먼저 학생을 등록해 주세요.")
@@ -226,7 +252,7 @@ elif menu == "출결 체크":
                     att_date = st.date_input("날짜", date.today(), key="att_add_date")
                     status = st.radio("상태", status_options, horizontal=True)
                     submit_att = st.form_submit_button("출결 저장")
-                    
+
                     if submit_att:
                         m_id = member_dict[target_member]
                         with engine.begin() as conn:
@@ -261,11 +287,14 @@ elif menu == "출결 체크":
                     with st.form("att_edit_form"):
                         try:
                             curr_dt = datetime.strptime(target_att['event_date'], "%Y-%m-%d").date()
-                        except:
+                        except (ValueError, TypeError):
                             curr_dt = date.today()
                         ed_att_date = st.date_input("날짜 수정", curr_dt)
                         curr_status_idx = status_options.index(target_att['status']) if target_att['status'] in status_options else 0
                         ed_att_status = st.radio("상태 수정", status_options, index=curr_status_idx, horizontal=True)
+
+                        # [수정 6] 삭제는 체크해야만 실행
+                        confirm_att_del = st.checkbox("이 출결 기록을 삭제합니다 (되돌릴 수 없음)")
 
                         btn_c1, btn_c2 = st.columns(2)
                         save_att = btn_c1.form_submit_button("수정 저장")
@@ -279,10 +308,13 @@ elif menu == "출결 체크":
                             st.rerun()
 
                         if del_att:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM attendance WHERE id = :id"), {"id": selected_att_id})
-                            st.success("출결이 삭제되었습니다.")
-                            st.rerun()
+                            if not confirm_att_del:
+                                st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
+                            else:
+                                with engine.begin() as conn:
+                                    conn.execute(text("DELETE FROM attendance WHERE id = :id"), {"id": selected_att_id})
+                                st.success("출결이 삭제되었습니다.")
+                                st.rerun()
 
         st.divider()
         st.subheader("🕒 최근 등록된 출결 (최신 10건)")
@@ -293,13 +325,14 @@ elif menu == "출결 체크":
                 JOIN members m ON a.member_id = m.id
                 ORDER BY a.id DESC LIMIT 10
             """, conn)
-        st.dataframe(recent_att, use_container_width=True)
+        st.dataframe(recent_att, width="stretch")
 
 # 3. 국어 성적 및 평가 입력
-elif menu == "성적 및 국어 평가 입력":
+elif menu == MENU_SCORE:
     st.header("3. 국어 성적 및 영역별 평가 분석 (통합 공통국어)")
     with engine.connect() as conn:
-        members = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY name ASC", conn)
+        # [수정 4] 퇴원생은 입력 목록에서 제외
+        members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
 
     if members.empty:
         st.warning("먼저 학생을 등록해 주세요.")
@@ -313,36 +346,42 @@ elif menu == "성적 및 국어 평가 입력":
                     target_member = st.selectbox("학생 선택", list(member_dict.keys()), key="score_add_target")
                     score_date = st.date_input("시험/평가 일자", date.today(), key="score_add_date")
                     category = st.text_input("평가 회차명 (예: 전국연합학력평가, 1학기 중간고사 국어)")
-                    
+
                     st.markdown("##### 📝 통합 국어 영역별 세부 득점")
                     c_sc1, c_sc2, c_sc3 = st.columns(3)
-                    reading_sc = c_sc1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=35.0, step=0.5)
-                    literature_sc = c_sc2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=35.0, step=0.5)
-                    grammar_sc = c_sc3.number_input("문법·어휘/화법 점수", min_value=0.0, max_value=100.0, value=20.0, step=0.5)
-                    
+                    # [수정 3] 기본값을 0으로 (깜빡해도 가짜 점수가 저장되지 않도록)
+                    reading_sc = c_sc1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
+                    literature_sc = c_sc2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
+                    grammar_sc = c_sc3.number_input("문법·어휘/화법 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
+
                     calc_total = reading_sc + literature_sc + grammar_sc
-                    st.info(f"💡 자동 합산 총점: **{calc_total:.1f}점**")
+                    st.caption("※ 총점은 '평가 데이터 저장'을 누를 때 세 영역을 더해 저장됩니다.")
 
                     wrong_q = st.text_input("주요 오답 문항 번호 / 취약 제재")
                     feedback = st.text_area("국어 피드백 및 약점 처방")
                     submit_score = st.form_submit_button("평가 데이터 저장")
-                    
-                    if submit_score and category:
-                        m_id = member_dict[target_member]
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                INSERT INTO scores (
-                                    member_id, record_date, category, score, feedback,
-                                    reading_score, literature_score, grammar_score, wrong_questions
-                                ) VALUES (
-                                    :m_id, :r_dt, :cat, :sc, :fb, :r_sc, :l_sc, :g_sc, :wq
-                                )
-                            """), {
-                                "m_id": m_id, "r_dt": str(score_date), "cat": category, "sc": calc_total, "fb": feedback,
-                                "r_sc": reading_sc, "l_sc": literature_sc, "g_sc": grammar_sc, "wq": wrong_q
-                            })
-                        st.success(f"{category} (총점 {calc_total:.1f}점) 저장이 완료되었습니다.")
-                        st.rerun()
+
+                    if submit_score:
+                        if not category:
+                            st.warning("평가 회차명을 입력해 주세요.")
+                        elif calc_total == 0:
+                            st.warning("영역별 점수가 모두 0점입니다. 점수를 입력했는지 확인해 주세요.")
+                        else:
+                            m_id = member_dict[target_member]
+                            with engine.begin() as conn:
+                                conn.execute(text("""
+                                    INSERT INTO scores (
+                                        member_id, record_date, category, score, feedback,
+                                        reading_score, literature_score, grammar_score, wrong_questions
+                                    ) VALUES (
+                                        :m_id, :r_dt, :cat, :sc, :fb, :r_sc, :l_sc, :g_sc, :wq
+                                    )
+                                """), {
+                                    "m_id": m_id, "r_dt": str(score_date), "cat": category, "sc": calc_total, "fb": feedback,
+                                    "r_sc": reading_sc, "l_sc": literature_sc, "g_sc": grammar_sc, "wq": wrong_q
+                                })
+                            st.success(f"{category} (총점 {calc_total:.1f}점) 저장이 완료되었습니다.")
+                            st.rerun()
 
         with col_sc_edit:
             with st.expander("✏️/🗑️ 등록된 성적 수정 및 삭제", expanded=False):
@@ -373,13 +412,15 @@ elif menu == "성적 및 국어 평가 입력":
                         ed_read = c_ed1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=float(target_row['reading_score'] or 0.0), step=0.5)
                         ed_lit = c_ed2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=float(target_row['literature_score'] or 0.0), step=0.5)
                         ed_gram = c_ed3.number_input("문법/화법 점수", min_value=0.0, max_value=100.0, value=float(target_row['grammar_score'] or 0.0), step=0.5)
-                        
+
                         ed_total = ed_read + ed_lit + ed_gram
-                        st.caption(f"수정 후 자동 계산 총점: {ed_total:.1f}점")
 
                         ed_wrong = st.text_input("오답 문항 메모", value=target_row['wrong_questions'] if target_row['wrong_questions'] else "")
                         ed_feedback = st.text_area("피드백", value=target_row['feedback'] if target_row['feedback'] else "")
-                        
+
+                        # [수정 6] 삭제는 체크해야만 실행
+                        confirm_sc_del = st.checkbox("이 성적 기록을 삭제합니다 (되돌릴 수 없음)")
+
                         btn_col1, btn_col2 = st.columns(2)
                         save_sc_btn = btn_col1.form_submit_button("수정 저장")
                         del_sc_btn = btn_col2.form_submit_button("기록 삭제", type="primary")
@@ -387,7 +428,7 @@ elif menu == "성적 및 국어 평가 입력":
                         if save_sc_btn:
                             with engine.begin() as conn:
                                 conn.execute(text("""
-                                    UPDATE scores 
+                                    UPDATE scores
                                     SET category = :cat, score = :sc, feedback = :fb,
                                         reading_score = :r_sc, literature_score = :l_sc, grammar_score = :g_sc, wrong_questions = :wq
                                     WHERE id = :id
@@ -395,14 +436,17 @@ elif menu == "성적 및 국어 평가 입력":
                                     "cat": ed_category, "sc": ed_total, "fb": ed_feedback,
                                     "r_sc": ed_read, "l_sc": ed_lit, "g_sc": ed_gram, "wq": ed_wrong, "id": selected_sc_id
                                 })
-                            st.success("국어 성적 수정이 완료되었습니다.")
+                            st.success(f"국어 성적 수정이 완료되었습니다. (총점 {ed_total:.1f}점)")
                             st.rerun()
 
                         if del_sc_btn:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": selected_sc_id})
-                            st.success("선택한 성적 기록이 삭제되었습니다.")
-                            st.rerun()
+                            if not confirm_sc_del:
+                                st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
+                            else:
+                                with engine.begin() as conn:
+                                    conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": selected_sc_id})
+                                st.success("선택한 성적 기록이 삭제되었습니다.")
+                                st.rerun()
 
         st.divider()
         st.subheader("🕒 최근 등록된 국어 평가 (최신 10건)")
@@ -415,13 +459,14 @@ elif menu == "성적 및 국어 평가 입력":
                 JOIN members m ON s.member_id = m.id
                 ORDER BY s.id DESC LIMIT 10
             """, conn)
-        st.dataframe(recent_sc, use_container_width=True)
+        st.dataframe(recent_sc, width="stretch")
 
 # 4. 상담/소통 일지
-elif menu == "상담/소통 일지":
+elif menu == MENU_LOG:
     st.header("4. 학생/학부모 소통 및 학습 면담 일지")
     with engine.connect() as conn:
-        members = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY name ASC", conn)
+        # [수정 4] 퇴원생은 입력 목록에서 제외
+        members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
 
     if members.empty:
         st.warning("먼저 학생을 등록해 주세요.")
@@ -437,7 +482,7 @@ elif menu == "상담/소통 일지":
                     topic = st.text_input("면담 주제")
                     details = st.text_area("상세 내용 및 다음 주 점검 과제")
                     submit_log = st.form_submit_button("일지 저장")
-                    
+
                     if submit_log and topic:
                         m_id = member_dict[target_member]
                         with engine.begin() as conn:
@@ -472,11 +517,14 @@ elif menu == "상담/소통 일지":
                     with st.form("log_edit_form"):
                         try:
                             curr_lg_dt = datetime.strptime(target_lg['log_date'], "%Y-%m-%d").date()
-                        except:
+                        except (ValueError, TypeError):
                             curr_lg_dt = date.today()
                         ed_log_date = st.date_input("상담 일자", curr_lg_dt)
                         ed_topic = st.text_input("상담 주제", value=target_lg['topic'])
                         ed_details = st.text_area("상세 내용", value=target_lg['details'] if target_lg['details'] else "")
+
+                        # [수정 6] 삭제는 체크해야만 실행
+                        confirm_lg_del = st.checkbox("이 상담 일지를 삭제합니다 (되돌릴 수 없음)")
 
                         btn_l1, btn_l2 = st.columns(2)
                         save_lg = btn_l1.form_submit_button("수정 저장")
@@ -490,10 +538,13 @@ elif menu == "상담/소통 일지":
                             st.rerun()
 
                         if del_lg:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM logs WHERE id = :id"), {"id": selected_lg_id})
-                            st.success("상담 일지가 삭제되었습니다.")
-                            st.rerun()
+                            if not confirm_lg_del:
+                                st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
+                            else:
+                                with engine.begin() as conn:
+                                    conn.execute(text("DELETE FROM logs WHERE id = :id"), {"id": selected_lg_id})
+                                st.success("상담 일지가 삭제되었습니다.")
+                                st.rerun()
 
         st.divider()
         st.subheader("🕒 최근 등록된 상담 기록 (최신 10건)")
@@ -504,13 +555,13 @@ elif menu == "상담/소통 일지":
                 JOIN members m ON l.member_id = m.id
                 ORDER BY l.id DESC LIMIT 10
             """, conn)
-        st.dataframe(recent_lg, use_container_width=True)
+        st.dataframe(recent_lg, width="stretch")
 
-# 5. 개인별 종합 조회
-elif menu == "개인별 종합 조회":
+# 5. 개인별 종합 조회 (퇴원생 기록도 볼 수 있도록 전체 학생 대상)
+elif menu == MENU_PORTFOLIO:
     st.header("5. 국어 학습 종합 포트폴리오")
     with engine.connect() as conn:
-        members = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY name ASC", conn)
+        members = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY name ASC", conn)
 
     if members.empty:
         st.warning("등록된 학생이 없습니다.")
@@ -529,7 +580,10 @@ elif menu == "개인별 종합 조회":
         if filtered_members.empty:
             st.warning("검색 조건과 일치하는 학생이 없습니다.")
         else:
-            member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": row['id'] for _, row in filtered_members.iterrows()}
+            member_dict = {
+                f"[{row['group_name']}] {row['name']} (ID:{row['id']})" + (" · 퇴원" if row['status'] == '퇴원' else ""): row['id']
+                for _, row in filtered_members.iterrows()
+            }
             selected_label = st.selectbox("조회할 학생 선택", list(member_dict.keys()), key="pf_student_select")
             selected_id = member_dict[selected_label]
 
@@ -540,18 +594,18 @@ elif menu == "개인별 종합 조회":
                 st.divider()
 
                 col_att, col_score = st.columns([1, 1.4])
-                
+
                 with col_att:
                     st.subheader("📅 최근 출결 현황")
                     df_att = pd.read_sql_query(text("SELECT event_date AS 일자, status AS 상태 FROM attendance WHERE member_id = :id ORDER BY event_date DESC"), conn, params={"id": selected_id})
-                    st.dataframe(df_att, use_container_width=True)
+                    st.dataframe(df_att, width="stretch")
 
                 with col_score:
                     st.subheader("📈 국어 총점 추이 그래프")
                     df_sc_chart = pd.read_sql_query(text(
                         "SELECT record_date, category, score FROM scores WHERE member_id = :id ORDER BY record_date ASC, id ASC"
                     ), conn, params={"id": selected_id})
-                    
+
                     if not df_sc_chart.empty:
                         df_sc_chart['회차'] = df_sc_chart['record_date'] + " (" + df_sc_chart['category'] + ")"
                         chart_data = df_sc_chart.set_index('회차')[['score']].rename(columns={'score': '국어 총점'})
@@ -567,25 +621,25 @@ elif menu == "개인별 종합 조회":
                            wrong_questions AS 주요오답, feedback AS 피드백
                     FROM scores WHERE member_id = :id ORDER BY record_date DESC
                 """), conn, params={"id": selected_id})
-                st.dataframe(df_sc_detail, use_container_width=True)
+                st.dataframe(df_sc_detail, width="stretch")
 
                 st.divider()
                 st.subheader("💬 상담 및 학습 면담 이력")
                 df_lg = pd.read_sql_query(text("SELECT log_date AS 일자, topic AS 주제, details AS 상세내용 FROM logs WHERE member_id = :id ORDER BY log_date DESC"), conn, params={"id": selected_id})
-                st.dataframe(df_lg, use_container_width=True)
+                st.dataframe(df_lg, width="stretch")
 
 # 6. 데이터 백업 (CSV/엑셀 다운로드)
-elif menu == "💾 데이터 백업 (CSV/엑셀)":
-    st.header("6. 전체 데이터 백업 및 엑셀(CSV) 다운로드")
+elif menu == MENU_BACKUP:
+    st.header("💾 6. 전체 데이터 백업 및 엑셀(CSV) 다운로드")
     st.write("클라우드 DB에 저장된 모든 데이터를 CSV 파일로 즉시 내려받을 수 있습니다.")
     st.divider()
 
     with engine.connect() as conn:
         df_exp_members = pd.read_sql_query("""
-            SELECT id AS 학생ID, name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 학습메모
+            SELECT id AS 학생ID, name AS 이름, group_name AS 소속_학교, contact AS 연락처, notes AS 학습메모, status AS 재원상태
             FROM members ORDER BY id ASC
         """, conn)
-        
+
         df_exp_attendance = pd.read_sql_query("""
             SELECT a.id AS 출결ID, a.event_date AS 일자, m.name AS 학생이름, m.group_name AS 소속_학교, a.status AS 출결상태
             FROM attendance a
@@ -611,11 +665,14 @@ elif menu == "💾 데이터 백업 (CSV/엑셀)":
             ORDER BY l.log_date DESC, l.id DESC
         """, conn)
 
+    def csv_bytes(df):
+        return df.to_csv(index=False).encode('utf-8-sig')
+
     st.subheader("1️⃣ 전체 학생 명단")
-    st.dataframe(df_exp_members, use_container_width=True)
+    st.dataframe(df_exp_members, width="stretch")
     st.download_button(
         label="📥 학생 명단 CSV 다운로드",
-        data=df_exp_members.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        data=csv_bytes(df_exp_members),
         file_name=f"국어학원_학생명단_{date.today()}.csv",
         mime="text/csv"
     )
@@ -623,10 +680,10 @@ elif menu == "💾 데이터 백업 (CSV/엑셀)":
     st.divider()
 
     st.subheader("2️⃣ 국어 성적 및 세부 평가 기록")
-    st.dataframe(df_exp_scores, use_container_width=True)
+    st.dataframe(df_exp_scores, width="stretch")
     st.download_button(
         label="📥 국어 성적/평가 CSV 다운로드",
-        data=df_exp_scores.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        data=csv_bytes(df_exp_scores),
         file_name=f"국어학원_성적평가기록_{date.today()}.csv",
         mime="text/csv"
     )
@@ -634,10 +691,10 @@ elif menu == "💾 데이터 백업 (CSV/엑셀)":
     st.divider()
 
     st.subheader("3️⃣ 전체 출결 기록")
-    st.dataframe(df_exp_attendance, use_container_width=True)
+    st.dataframe(df_exp_attendance, width="stretch")
     st.download_button(
         label="📥 출결 기록 CSV 다운로드",
-        data=df_exp_attendance.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        data=csv_bytes(df_exp_attendance),
         file_name=f"국어학원_출결기록_{date.today()}.csv",
         mime="text/csv"
     )
@@ -645,10 +702,10 @@ elif menu == "💾 데이터 백업 (CSV/엑셀)":
     st.divider()
 
     st.subheader("4️⃣ 상담 및 학습 면담 일지")
-    st.dataframe(df_exp_logs, use_container_width=True)
+    st.dataframe(df_exp_logs, width="stretch")
     st.download_button(
         label="📥 상담 일지 CSV 다운로드",
-        data=df_exp_logs.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'),
+        data=csv_bytes(df_exp_logs),
         file_name=f"국어학원_상담일지_{date.today()}.csv",
         mime="text/csv"
     )
