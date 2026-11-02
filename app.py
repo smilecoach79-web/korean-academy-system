@@ -146,37 +146,38 @@ if menu == "구성원 등록/목록":
                         st.success(f"'{edit_name}' 학생 정보가 수정되었습니다.")
                         st.rerun()
 
-   	with col_del:
-            with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
-            with engine.connect() as conn:
-            m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
+    with col_del:
+         with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
+              with engine.connect() as conn:
+                m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
 
-        if m_list.empty:
-            st.info("등록된 인원이 없습니다.")
-        else:
-            del_options = {
-                f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']})": row['id']
-                for _, row in m_list.iterrows()
-            }
-            target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
-            target_id = del_options[target_del_label]
+            if m_list.empty:
+                st.info("등록된 인원이 없습니다.")
+            else:
+                # ID 번호는 가리고 상태와 이름만 단정하게 표시
+                del_options = {
+                    f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']})": row['id']
+                    for _, row in m_list.iterrows()
+                }
+                target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
+                target_id = del_options[target_del_label]
 
-            st.caption("※ 퇴원 처리해도 과거 성적, 출결, 상담 기록은 안전하게 보존됩니다.")
-            col_b1, col_b2 = st.columns(2)
+                st.caption("※ 퇴원 처리해도 과거 성적, 출결, 상담 기록은 안전하게 보존됩니다.")
+                col_b1, col_b2 = st.columns(2)
 
-            with col_b1:
-                if st.button("🚫 '퇴원' 처리", use_container_width=True):
-                    with engine.begin() as conn:
-                        conn.execute(text("UPDATE members SET status = '퇴원' WHERE id = :id"), {"id": target_id})
-                    st.warning("퇴원 처리되었습니다. 메인 목록에서 숨겨집니다.")
-                    st.rerun()
+                with col_b1:
+                    if st.button("🚫 '퇴원' 처리", use_container_width=True):
+                        with engine.begin() as conn:
+                            conn.execute(text("UPDATE members SET status = '퇴원' WHERE id = :id"), {"id": target_id})
+                        st.warning("퇴원 처리되었습니다. 메인 목록에서 숨겨집니다.")
+                        st.rerun()
 
-            with col_b2:
-                if st.button("🔄 '재원' 복원", use_container_width=True):
-                    with engine.begin() as conn:
-                        conn.execute(text("UPDATE members SET status = '재원' WHERE id = :id"), {"id": target_id})
-                    st.success("재원생으로 다시 복원되었습니다.")
-                    st.rerun()
+                with col_b2:
+                    if st.button("🔄 '재원' 복원", use_container_width=True):
+                        with engine.begin() as conn:
+                            conn.execute(text("UPDATE members SET status = '재원' WHERE id = :id"), {"id": target_id})
+                        st.success("재원생으로 다시 복원되었습니다.")
+                        st.rerun()
 
     st.divider()
     st.subheader("📋 전체 학생 명단 검색 및 조회")
