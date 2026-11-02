@@ -239,6 +239,11 @@ with st.sidebar:
         st.session_state.logged_in = False
         st.rerun()
 
+# 저장 후 화면을 새로 그려도 완료 메시지가 보이도록 (오른쪽 아래 알림) [수정 16]
+if "flash" in st.session_state:
+    st.toast(st.session_state.pop("flash"))
+
+
 # 오늘 수업 카드의 '출결 입력' 버튼: 출결 메뉴로 이동하면서 그 반을 미리 선택 [수정 13]
 def go_class_attendance(class_name):
     st.session_state["menu"] = MENU_ATT
@@ -1161,22 +1166,25 @@ elif menu == MENU_CLASS:
             else:
                 label_of = {int(r["id"]): f"{r['name']} ({r['group_name'] or '소속 없음'}) · ID {r['id']}" for _, r in students.iterrows()}
                 cur_ids = [int(i) for i in current["member_id"] if int(i) in label_of]
-                picked = st.multiselect(
-                    f"{as_name} 학생 (이름을 입력하면 검색돼요)",
-                    options=list(label_of.keys()),
-                    default=cur_ids,
-                    format_func=lambda i: label_of[i],
-                    key=f"assign_ms_{as_id}",
-                )
-                st.caption(f"선택 {len(picked)}명 · 현재 저장 {len(cur_ids)}명")
-                if st.button("💾 학생 배정 저장", type="primary", key=f"assign_save_{as_id}"):
+                # [수정 16] 양식(form) 안에 넣어서, 학생을 고르는 동안에는 화면을 다시 그리지 않음
+                #           → '저장'을 누를 때 한 번만 실행되어 흐려짐이 없어짐
+                st.caption(f"현재 저장된 학생 {len(cur_ids)}명 · 다 고른 뒤 '저장'을 누르세요")
+                with st.form(f"assign_form_{as_id}"):
+                    picked = st.multiselect(
+                        f"{as_name} 학생 (이름을 입력하면 검색돼요)",
+                        options=list(label_of.keys()),
+                        default=cur_ids,
+                        format_func=lambda i: label_of[i],
+                    )
+                    save_assign = st.form_submit_button("💾 학생 배정 저장", type="primary")
+                if save_assign:
                     with engine.begin() as conn:
                         conn.execute(text("DELETE FROM class_members WHERE class_id = :c"), {"c": as_id})
                         for mid in picked:
                             conn.execute(text("INSERT INTO class_members (class_id, member_id) VALUES (:c, :m)"),
                                          {"c": as_id, "m": int(mid)})
                     added, removed = set(picked) - set(cur_ids), set(cur_ids) - set(picked)
-                    st.success(f"{as_name} 학생 배정을 저장했어요. (추가 {len(added)}명, 제외 {len(removed)}명)")
+                    st.session_state["flash"] = f"✅ {as_name} 학생 배정 저장 · 총 {len(picked)}명 (추가 {len(added)}명, 제외 {len(removed)}명)"
                     st.rerun()
 
 # 6. 데이터 백업 (CSV/엑셀 다운로드)
