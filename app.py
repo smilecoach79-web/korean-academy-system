@@ -1,3 +1,4 @@
+import html
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
@@ -1207,6 +1208,14 @@ elif menu == MENU_TIMETABLE:
             WHERE c.active
             ORDER BY s.weekday, s.start_time
         """, conn)
+        # [수정 20] 반별 학생 이름 (마우스를 올리면 보여 줄 목록)
+        tt_names = pd.read_sql_query("""
+            SELECT cm.class_id, m.name, m.group_name
+            FROM class_members cm JOIN members m ON m.id = cm.member_id
+            WHERE m.status = '재원' OR m.status IS NULL
+            ORDER BY m.name
+        """, conn)
+    names_map = {cid: list(g["name"]) for cid, g in tt_names.groupby("class_id")}
 
     if tt.empty:
         st.info("아직 등록된 수업이 없습니다. '반·시간표 관리'에서 반과 수업 시간을 등록해 주세요.")
@@ -1215,7 +1224,38 @@ elif menu == MENU_TIMETABLE:
             h, m = hhmm.split(":")
             return int(h) * 60 + int(m)
         total_min = sum(minutes(r.end_time) - minutes(r.start_time) for r in tt.itertuples())
-        st.caption(f"주간 수업 {len(tt)}회 · 반 {tt['class_id'].nunique()}개 · 총 {total_min // 60}시간 {total_min % 60}분")
+        cap_col, tog_col = st.columns([3, 1])
+        cap_col.caption(f"주간 수업 {len(tt)}회 · 반 {tt['class_id'].nunique()}개 · 총 {total_min // 60}시간 {total_min % 60}분"
+                        " · 카드에 마우스를 올리면 학생 이름이 보여요")
+        show_names = tog_col.toggle("학생 이름 펼쳐 보기", key="tt_show_names",
+                                    help="휴대폰처럼 마우스가 없을 때 켜 두면 카드에 이름이 바로 보여요.")
+
+        # 마우스를 올리면 뜨는 말풍선 모양
+        st.markdown("""
+        <style>
+        .tt-card { position: relative; cursor: default; transition: box-shadow 0.12s, transform 0.12s; }
+        .tt-card:hover, .tt-card:focus { box-shadow: 0 6px 14px rgba(0,0,0,0.12) !important; transform: translateY(-1px); outline: none; }
+        .tt-pop {
+            display: none; position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 1000;
+            background: #262730; color: #ffffff; border-radius: 10px; padding: 10px 12px;
+            font-size: 0.82rem; line-height: 1.6; box-shadow: 0 10px 24px rgba(0,0,0,0.22);
+            word-break: keep-all;
+        }
+        .tt-pop::before {
+            content: ""; position: absolute; top: -6px; left: 18px;
+            border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 6px solid #262730;
+        }
+        .tt-pop b { color: #ffb4b4; font-weight: 700; }
+        .tt-card:hover .tt-pop, .tt-card:focus .tt-pop { display: block; }
+        .tt-names { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #d5d9e0;
+                    font-size: 0.78rem; color: #31333f; line-height: 1.55; word-break: keep-all; }
+        [data-testid="stColumn"], [data-testid="column"] { overflow: visible !important; }
+        /* 마우스를 올린 카드를 아래 카드보다 위로 올려서 말풍선이 가려지지 않게 */
+        [data-testid="stElementContainer"]:has(.tt-card:hover),
+        [data-testid="stElementContainer"]:has(.tt-card:focus),
+        .element-container:has(.tt-card:hover) { position: relative; z-index: 1000; }
+        </style>
+        """, unsafe_allow_html=True)
 
         today_wd = today_kst().weekday()
         cols = st.columns(7)
@@ -1234,12 +1274,17 @@ elif menu == MENU_TIMETABLE:
                                 unsafe_allow_html=True)
                 for r in day.itertuples():
                     border = "#ff4b4b" if is_today else "#8b93a7"
+                    stu = names_map.get(r.class_id, [])
+                    stu_txt = ", ".join(html.escape(n) for n in stu) if stu else "배정된 학생이 없어요"
+                    # 이름을 펼쳐 둔 상태면 카드 안에, 아니면 마우스를 올렸을 때 말풍선으로
+                    names_block = (f"<div class='tt-names'>{stu_txt}</div>" if show_names else
+                                   f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}</div>")
                     st.markdown(
-                        f"<div style='border:1px solid #d5d9e0;border-left:5px solid {border};border-radius:8px;"
+                        f"<div class='tt-card' tabindex='0' style='border:1px solid #d5d9e0;border-left:5px solid {border};border-radius:8px;"
                         f"padding:8px 10px;margin-bottom:8px;background:#ffffff;box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
                         f"<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
-                        f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{r.name}</div>"
-                        f"<div style='font-size:0.78rem;color:#808495'>학생 {r.n}명</div></div>",
+                        f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{html.escape(r.name)}</div>"
+                        f"<div style='font-size:0.78rem;color:#808495'>학생 {r.n}명</div>{names_block}</div>",
                         unsafe_allow_html=True)
 
 # 8. 반·시간표 관리 [수정 12]
