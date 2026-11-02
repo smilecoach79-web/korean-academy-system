@@ -1,6 +1,13 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+
+# [수정 7] 서버(Streamlit Cloud)는 영국 기준 시간(UTC)으로 돌아가므로 한국 시간으로 고정
+KST = timezone(timedelta(hours=9))
+
+
+def today_kst():
+    return datetime.now(KST).date()
 from sqlalchemy import create_engine, text
 
 # ----------------- DB 연결 설정 (Supabase PostgreSQL) -----------------
@@ -99,9 +106,9 @@ if not st.session_state.logged_in:
     st.stop()
 
 # ----------------- 본 프로그램 화면 -----------------
-st.title("📚 국어 종합 관리 시스템")
 
 # [수정 1] 메뉴 이름을 상수로 두고, 아래 조건문에서도 같은 이름을 쓰도록 통일
+MENU_TODAY = "🏠  오늘"
 MENU_MEMBERS = "👥  구성원 등록/목록"
 MENU_ATT = "📅  출결 체크"
 MENU_SCORE = "📝  성적 및 국어 평가"
@@ -115,7 +122,13 @@ st.markdown("""
 <style>
 /* 메뉴 항목 하나하나: 볼록 튀어나온 버튼
    (신버전 Streamlit: label[data-testid="stRadioOption"], 구버전: label[data-baseweb="radio"]) */
-section[data-testid="stSidebar"] [role="radiogroup"] > div { width: 100%; }
+/* [수정 9] 메뉴 묶음이 사이드바 폭을 꽉 채우도록 */
+section[data-testid="stSidebar"] [data-testid="stElementContainer"]:has([data-testid="stRadio"]),
+section[data-testid="stSidebar"] [data-testid="stRadio"],
+section[data-testid="stSidebar"] [data-testid="stRadio"] > div,
+section[data-testid="stSidebar"] [role="radiogroup"],
+section[data-testid="stSidebar"] [role="radiogroup"] > div { width: 100% !important; }
+section[data-testid="stSidebar"] [role="radiogroup"] { align-items: stretch !important; }
 section[data-testid="stSidebar"] label[data-testid="stRadioOption"],
 section[data-testid="stSidebar"] label[data-baseweb="radio"] {
     display: flex;
@@ -171,18 +184,81 @@ section[data-testid="stSidebar"] [role="radiogroup"] p {
 
 with st.sidebar:
     st.markdown("### 📚 국어 관리 시스템")
-    st.caption(f"오늘 {date.today().strftime('%Y년 %m월 %d일')}")
+    st.caption(f"오늘 {today_kst().strftime('%Y년 %m월 %d일')} ({'월화수목금토일'[today_kst().weekday()]})")
     st.divider()
     menu = st.radio("메뉴 선택", [
-        MENU_MEMBERS, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO, MENU_BACKUP
+        MENU_TODAY, MENU_MEMBERS, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO, MENU_BACKUP
     ], label_visibility="collapsed")
     st.divider()
     if st.button("🔒 로그아웃", width="stretch"):
         st.session_state.logged_in = False
         st.rerun()
 
+# 0. 오늘 (첫 화면) [수정 10]
+if menu == MENU_TODAY:
+    t = today_kst()
+    t_str = str(t)
+    week_ago = str(t - timedelta(days=7))
+    st.header(f"🏠 오늘 · {t.strftime('%m월 %d일')} ({'월화수목금토일'[t.weekday()]})")
+
+    with engine.connect() as conn:
+        active = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY group_name, name", conn)
+        att_today = pd.read_sql_query(text("""
+            SELECT a.member_id, m.name AS 이름, m.group_name AS 소속, a.status AS 상태
+            FROM attendance a JOIN members m ON a.member_id = m.id
+            WHERE a.event_date = :d ORDER BY m.group_name, m.name
+        """), conn, params={"d": t_str})
+        log_week = conn.execute(text("SELECT COUNT(*) FROM logs WHERE log_date >= :d"), {"d": week_ago}).scalar()
+        recent_logs = pd.read_sql_query("""
+            SELECT l.log_date AS 일자, m.name AS 이름, m.group_name AS 소속, l.topic AS 주제
+            FROM logs l JOIN members m ON l.member_id = m.id
+            ORDER BY l.log_date DESC, l.id DESC LIMIT 5
+        """, conn)
+        recent_scores = pd.read_sql_query("""
+            SELECT s.record_date AS 일자, m.name AS 이름, s.category AS 평가명, s.score AS 총점
+            FROM scores s JOIN members m ON s.member_id = m.id
+            ORDER BY s.record_date DESC, s.id DESC LIMIT 5
+        """, conn)
+
+    absent_late = att_today[att_today["상태"].isin(["결석", "지각"])] if not att_today.empty else att_today
+    entered_ids = set(att_today["member_id"]) if not att_today.empty else set()
+    not_entered = active[~active["id"].isin(entered_ids)]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("재원생", f"{len(active)}명")
+    c2.metric("오늘 출결 입력", f"{len(entered_ids & set(active['id']))} / {len(active)}명")
+    c3.metric("오늘 결석·지각", f"{len(absent_late)}명")
+    c4.metric("최근 7일 상담", f"{log_week}건")
+
+    st.divider()
+    col_l, col_r = st.columns(2)
+
+    with col_l:
+        st.subheader("📅 오늘 출결")
+        if att_today.empty:
+            st.info("오늘 입력된 출결이 아직 없습니다.")
+        else:
+            st.dataframe(att_today.drop(columns=["member_id"]), hide_index=True, width="stretch")
+        if not not_entered.empty:
+            with st.expander(f"⏳ 오늘 출결 미입력 {len(not_entered)}명"):
+                for grp, g in not_entered.groupby(not_entered["group_name"].fillna("소속 없음")):
+                    st.markdown(f"**{grp}** · " + ", ".join(g["name"]))
+
+    with col_r:
+        st.subheader("💬 최근 상담")
+        if recent_logs.empty:
+            st.info("상담 기록이 없습니다.")
+        else:
+            st.dataframe(recent_logs, hide_index=True, width="stretch")
+
+        st.subheader("📝 최근 시험 결과")
+        if recent_scores.empty:
+            st.info("성적 기록이 없습니다.")
+        else:
+            st.dataframe(recent_scores, hide_index=True, width="stretch")
+
 # 1. 구성원 등록 및 목록
-if menu == MENU_MEMBERS:
+elif menu == MENU_MEMBERS:
     st.header("👥 구성원 등록 및 목록")
     col_add, col_edit, col_del = st.columns([1, 1, 1])
 
@@ -297,7 +373,8 @@ if menu == MENU_MEMBERS:
             ]
 
         st.caption(f"검색 결과: 총 **{len(filtered_df)}명** / 전체 {len(df_members_raw)}명")
-        st.dataframe(filtered_df, width="stretch")
+        # [수정 11] 왼쪽 0,1,2 번호 칸 숨기고, 빈칸의 None은 비워서 표시
+        st.dataframe(filtered_df.fillna(""), hide_index=True, width="stretch")
 
 # 2. 출결 체크
 elif menu == MENU_ATT:
@@ -317,7 +394,7 @@ elif menu == MENU_ATT:
             with st.expander("➕ 새 출결 입력", expanded=True):
                 with st.form("attendance_form"):
                     target_member = st.selectbox("학생 선택", list(member_dict.keys()), key="att_add_target")
-                    att_date = st.date_input("날짜", date.today(), key="att_add_date")
+                    att_date = st.date_input("날짜", today_kst(), key="att_add_date")
                     status = st.radio("상태", status_options, horizontal=True)
                     submit_att = st.form_submit_button("출결 저장")
 
@@ -356,7 +433,7 @@ elif menu == MENU_ATT:
                         try:
                             curr_dt = datetime.strptime(target_att['event_date'], "%Y-%m-%d").date()
                         except (ValueError, TypeError):
-                            curr_dt = date.today()
+                            curr_dt = today_kst()
                         ed_att_date = st.date_input("날짜 수정", curr_dt)
                         curr_status_idx = status_options.index(target_att['status']) if target_att['status'] in status_options else 0
                         ed_att_status = st.radio("상태 수정", status_options, index=curr_status_idx, horizontal=True)
@@ -412,7 +489,7 @@ elif menu == MENU_SCORE:
             with st.expander("➕ 새 국어 시험/평가 기록", expanded=True):
                 with st.form("score_form"):
                     target_member = st.selectbox("학생 선택", list(member_dict.keys()), key="score_add_target")
-                    score_date = st.date_input("시험/평가 일자", date.today(), key="score_add_date")
+                    score_date = st.date_input("시험/평가 일자", today_kst(), key="score_add_date")
                     category = st.text_input("평가 회차명 (예: 전국연합학력평가, 1학기 중간고사 국어)")
 
                     st.markdown("##### 📝 통합 국어 영역별 세부 득점")
@@ -546,7 +623,7 @@ elif menu == MENU_LOG:
             with st.expander("➕ 새 상담 일지 작성", expanded=True):
                 with st.form("log_form"):
                     target_member = st.selectbox("학생 선택", list(member_dict.keys()), key="log_add_target")
-                    log_date = st.date_input("상담 일자", date.today(), key="log_add_date")
+                    log_date = st.date_input("상담 일자", today_kst(), key="log_add_date")
                     topic = st.text_input("면담 주제")
                     details = st.text_area("상세 내용 및 다음 주 점검 과제")
                     submit_log = st.form_submit_button("일지 저장")
@@ -586,7 +663,7 @@ elif menu == MENU_LOG:
                         try:
                             curr_lg_dt = datetime.strptime(target_lg['log_date'], "%Y-%m-%d").date()
                         except (ValueError, TypeError):
-                            curr_lg_dt = date.today()
+                            curr_lg_dt = today_kst()
                         ed_log_date = st.date_input("상담 일자", curr_lg_dt)
                         ed_topic = st.text_input("상담 주제", value=target_lg['topic'])
                         ed_details = st.text_area("상세 내용", value=target_lg['details'] if target_lg['details'] else "")
@@ -741,7 +818,7 @@ elif menu == MENU_BACKUP:
     st.download_button(
         label="📥 학생 명단 CSV 다운로드",
         data=csv_bytes(df_exp_members),
-        file_name=f"국어학원_학생명단_{date.today()}.csv",
+        file_name=f"국어학원_학생명단_{today_kst()}.csv",
         mime="text/csv"
     )
 
@@ -752,7 +829,7 @@ elif menu == MENU_BACKUP:
     st.download_button(
         label="📥 국어 성적/평가 CSV 다운로드",
         data=csv_bytes(df_exp_scores),
-        file_name=f"국어학원_성적평가기록_{date.today()}.csv",
+        file_name=f"국어학원_성적평가기록_{today_kst()}.csv",
         mime="text/csv"
     )
 
@@ -763,7 +840,7 @@ elif menu == MENU_BACKUP:
     st.download_button(
         label="📥 출결 기록 CSV 다운로드",
         data=csv_bytes(df_exp_attendance),
-        file_name=f"국어학원_출결기록_{date.today()}.csv",
+        file_name=f"국어학원_출결기록_{today_kst()}.csv",
         mime="text/csv"
     )
 
@@ -774,6 +851,6 @@ elif menu == MENU_BACKUP:
     st.download_button(
         label="📥 상담 일지 CSV 다운로드",
         data=csv_bytes(df_exp_logs),
-        file_name=f"국어학원_상담일지_{date.today()}.csv",
+        file_name=f"국어학원_상담일지_{today_kst()}.csv",
         mime="text/csv"
     )
