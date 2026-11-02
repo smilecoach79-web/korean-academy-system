@@ -113,11 +113,16 @@ MENU_BACKUP = "💾  데이터 백업"
 # 라디오 버튼의 동그라미를 숨기고, 메뉴 하나하나를 버튼처럼 보이게 함
 st.markdown("""
 <style>
-/* 메뉴 항목 하나하나: 볼록 튀어나온 버튼 */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label {
+/* 메뉴 항목 하나하나: 볼록 튀어나온 버튼
+   (신버전 Streamlit: label[data-testid="stRadioOption"], 구버전: label[data-baseweb="radio"]) */
+section[data-testid="stSidebar"] [role="radiogroup"] > div { width: 100%; }
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"],
+section[data-testid="stSidebar"] label[data-baseweb="radio"] {
+    display: flex;
     width: 100%;
+    box-sizing: border-box;
     padding: 12px 16px;
-    margin-bottom: 10px;
+    margin: 0 0 10px 0;
     border-radius: 12px;
     background: linear-gradient(180deg, #ffffff 0%, #eef0f4 100%);
     border: 1px solid #d5d9e0;
@@ -126,32 +131,39 @@ section[data-testid="stSidebar"] div[role="radiogroup"] > label {
     cursor: pointer;
 }
 /* 라디오 동그라미 숨기기 */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]),
+section[data-testid="stSidebar"] label[data-baseweb="radio"] > div:first-child {
     display: none;
 }
 /* 마우스를 올렸을 때: 살짝 떠오름 */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:hover,
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:hover {
     transform: translateY(-1px);
     box-shadow: 0 5px 0 #c3c8d1, 0 8px 14px rgba(0, 0, 0, 0.14);
 }
 /* 누르는 순간: 쑥 눌림 */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:active {
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:active,
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:active {
     transform: translateY(3px);
     box-shadow: 0 1px 0 #c3c8d1, 0 2px 4px rgba(0, 0, 0, 0.10);
 }
 /* 지금 선택된 메뉴: 눌린 채로 색이 들어간 버튼 */
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"][data-selected="true"],
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:has(input:checked),
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) {
     background: linear-gradient(180deg, #ff6b6b 0%, #e63c3c 100%);
     border-color: #c92f2f;
     transform: translateY(3px);
     box-shadow: 0 1px 0 #a82424, inset 0 2px 4px rgba(0, 0, 0, 0.25);
 }
-section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) p {
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"][data-selected="true"] p,
+section[data-testid="stSidebar"] label[data-testid="stRadioOption"]:has(input:checked) p,
+section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) p {
     color: #ffffff;
     font-weight: 700;
 }
 /* 메뉴 글자 크기 */
-section[data-testid="stSidebar"] div[role="radiogroup"] p {
+section[data-testid="stSidebar"] [role="radiogroup"] p {
     font-size: 1.02rem;
 }
 </style>
