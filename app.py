@@ -417,23 +417,46 @@ elif menu == MENU_MEMBERS:
     st.header("👥 구성원 등록 및 목록")
     col_add, col_edit, col_del = st.columns([1, 1, 1])
 
+    # [수정 18] 등록 버튼을 누르면 실행: 같은 이름이 있으면 먼저 확인, 저장 후 입력칸 비우기
+    def add_member_cb():
+        nm = st.session_state.get("new_name", "").strip()
+        if not nm:
+            st.session_state["add_msg"] = ("warning", "학생 이름을 입력해 주세요.")
+            return
+        with engine.connect() as conn:
+            dup = pd.read_sql_query(text("SELECT id, name, group_name, status FROM members WHERE name = :n ORDER BY id"),
+                                    conn, params={"n": nm})
+        if not dup.empty and not st.session_state.get("new_dup_ok", False):
+            who = ", ".join(f"{r['name']}({r['group_name'] or '소속 없음'}, {r['status'] or '재원'}) · ID {r['id']}"
+                            for _, r in dup.iterrows())
+            st.session_state["add_msg"] = ("warning",
+                f"이미 같은 이름이 등록되어 있어요 → {who}\n\n"
+                "동명이인이 맞다면 위의 '동명이인이 맞습니다'를 체크하고 다시 등록하세요.")
+            return
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO members (name, group_name, contact, notes, status)
+                VALUES (:name, :group_name, :contact, :notes, '재원')
+            """), {"name": nm, "group_name": st.session_state.get("new_group", "").strip(),
+                   "contact": st.session_state.get("new_contact", "").strip(),
+                   "notes": st.session_state.get("new_notes", "").strip()})
+        for k in ["new_name", "new_group", "new_contact", "new_notes"]:
+            st.session_state[k] = ""
+        st.session_state["new_dup_ok"] = False
+        st.session_state["flash"] = f"✅ '{nm}' 학생을 등록했어요."
+
     with col_add:
         with st.expander("➕ 새 학생 등록", expanded=False):
             with st.form("add_member_form"):
-                name = st.text_input("학생 이름 *")
-                group_name = st.text_input("학교 및 학년/반 (예: 비전고1, 한광고2)")
-                contact = st.text_input("연락처")
-                notes = st.text_input("기본 메모 (취약 영역, 목표 등급/대학)")
-                submit = st.form_submit_button("등록하기")
-
-                if submit and name:
-                    with engine.begin() as conn:
-                        conn.execute(text("""
-                            INSERT INTO members (name, group_name, contact, notes, status)
-                            VALUES (:name, :group_name, :contact, :notes, '재원')
-                        """), {"name": name, "group_name": group_name, "contact": contact, "notes": notes})
-                    st.success(f"'{name}' 학생이 클라우드 DB에 등록되었습니다.")
-                    st.rerun()
+                st.text_input("학생 이름 *", key="new_name")
+                st.text_input("학교 및 학년/반 (예: 비전고1, 한광고2)", key="new_group")
+                st.text_input("연락처", key="new_contact")
+                st.text_input("기본 메모 (취약 영역, 목표 등급/대학)", key="new_notes")
+                st.checkbox("동명이인이 맞습니다 (같은 이름의 다른 학생)", key="new_dup_ok")
+                st.form_submit_button("등록하기", on_click=add_member_cb)
+            if "add_msg" in st.session_state:
+                kind, msg = st.session_state.pop("add_msg")
+                st.warning(msg)
 
     with col_edit:
         with st.expander("✏️ 학생 정보 수정", expanded=False):
@@ -468,7 +491,7 @@ elif menu == MENU_MEMBERS:
                         st.rerun()
 
     with col_del:
-        with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
+        with st.expander("⚙️ 퇴원 처리 · 삭제", expanded=False):
             with engine.connect() as conn:
                 m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
 
@@ -490,14 +513,43 @@ elif menu == MENU_MEMBERS:
                     if st.button("🚫 '퇴원' 처리", width="stretch"):
                         with engine.begin() as conn:
                             conn.execute(text("UPDATE members SET status = '퇴원' WHERE id = :id"), {"id": target_id})
-                        st.warning("퇴원 처리되었습니다. 메인 목록에서 숨겨집니다.")
+                        st.session_state["flash"] = "🚫 퇴원 처리했어요. 명단과 입력 화면에서 숨겨집니다."
                         st.rerun()
 
                 with col_b2:
                     if st.button("🔄 '재원' 복원", width="stretch"):
                         with engine.begin() as conn:
                             conn.execute(text("UPDATE members SET status = '재원' WHERE id = :id"), {"id": target_id})
-                        st.success("재원생으로 다시 복원되었습니다.")
+                        st.session_state["flash"] = "🔄 재원생으로 복원했어요."
+                        st.rerun()
+
+                # [수정 18] 잘못 등록한 학생 완전 삭제
+                st.divider()
+                st.markdown("**🗑️ 잘못 등록한 학생 완전 삭제**")
+                with engine.connect() as conn:
+                    linked = conn.execute(text("""
+                        SELECT (SELECT COUNT(*) FROM attendance WHERE member_id = :id),
+                               (SELECT COUNT(*) FROM scores WHERE member_id = :id),
+                               (SELECT COUNT(*) FROM logs WHERE member_id = :id),
+                               (SELECT COUNT(*) FROM class_members WHERE member_id = :id)
+                    """), {"id": int(target_id)}).fetchone()
+                n_att, n_sc, n_lg, n_cls = [int(x) for x in linked]
+                if n_att + n_sc + n_lg == 0:
+                    st.caption("이 학생에게 연결된 출결·성적·상담 기록이 없어 안전하게 지울 수 있어요.")
+                else:
+                    st.warning(f"이 학생의 출결 {n_att}건, 성적 {n_sc}건, 상담 {n_lg}건도 함께 영구 삭제됩니다. "
+                               "그만둔 학생이라면 삭제 대신 '퇴원' 처리를 권해요.")
+                confirm_m_del = st.checkbox("위 학생을 완전히 삭제합니다 (되돌릴 수 없음)", key=f"confirm_mdel_{target_id}")
+                if st.button("완전 삭제", type="primary", width="stretch", key="member_hard_delete"):
+                    if not confirm_m_del:
+                        st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
+                    else:
+                        del_name = m_list[m_list["id"] == target_id].iloc[0]["name"]
+                        with engine.begin() as conn:
+                            # 출결·성적·상담·반 배정은 ON DELETE CASCADE로 함께 지워짐
+                            conn.execute(text("DELETE FROM members WHERE id = :id"), {"id": int(target_id)})
+                        st.session_state.pop("del_selector", None)
+                        st.session_state["flash"] = f"🗑️ '{del_name}' (ID {target_id}) 학생을 삭제했어요."
                         st.rerun()
 
     st.divider()
