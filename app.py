@@ -147,8 +147,8 @@ if menu == "구성원 등록/목록":
                         st.rerun()
 
     with col_del:
-         with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
-              with engine.connect() as conn:
+        with st.expander("⚙️ 퇴원 처리 및 원생 상태 변경", expanded=False):
+            with engine.connect() as conn:
                 m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
 
             if m_list.empty:
