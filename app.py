@@ -877,7 +877,9 @@ elif menu == MENU_MEMBERS:
                     edit_notes = st.text_input("기본 메모", value=sv(curr_info['notes']))
                     submit_edit = st.form_submit_button("수정사항 저장")
 
-                    if submit_edit and edit_name:
+                    if submit_edit and not edit_name.strip():
+                        st.warning("학생 이름은 비워 둘 수 없어요.")
+                    if submit_edit and edit_name.strip():
                         with engine.begin() as conn:
                             conn.execute(text("""
                                 UPDATE members
@@ -886,7 +888,7 @@ elif menu == MENU_MEMBERS:
                                 WHERE id = :id
                             """), {"name": edit_name, "group_name": edit_group, "contact": edit_contact, "notes": edit_notes,
                                    "pc": edit_parent.strip(), "pr": "" if edit_rel == "-" else edit_rel, "id": target_edit_id})
-                        st.success(f"'{edit_name}' 학생 정보가 수정되었습니다.")
+                        st.session_state["flash"] = "✅ " + f"'{edit_name}' 학생 정보가 수정되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                         st.rerun()
 
     with col_del:
@@ -1219,7 +1221,7 @@ elif menu == MENU_ATT:
                                 INSERT INTO attendance (member_id, event_date, status)
                                 VALUES (:member_id, :event_date, :status)
                             """), {"member_id": m_id, "event_date": str(att_date), "status": status})
-                        st.success("출결이 클라우드에 저장되었습니다.")
+                        st.session_state["flash"] = "✅ " + "출결이 클라우드에 저장되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                         st.rerun()
 
         with col_att_edit:
@@ -1263,7 +1265,7 @@ elif menu == MENU_ATT:
                             with engine.begin() as conn:
                                 conn.execute(text("UPDATE attendance SET event_date = :dt, status = :st WHERE id = :id"),
                                              {"dt": str(ed_att_date), "st": ed_att_status, "id": selected_att_id})
-                            st.success("출결이 수정되었습니다.")
+                            st.session_state["flash"] = "✅ " + "출결이 수정되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                             st.rerun()
 
                         if del_att:
@@ -1272,7 +1274,7 @@ elif menu == MENU_ATT:
                             else:
                                 with engine.begin() as conn:
                                     conn.execute(text("DELETE FROM attendance WHERE id = :id"), {"id": selected_att_id})
-                                st.success("출결이 삭제되었습니다.")
+                                st.session_state["flash"] = "✅ " + "출결이 삭제되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                                 st.rerun()
 
         st.divider()
@@ -2320,7 +2322,7 @@ elif menu == MENU_CLASS:
                         with engine.begin() as conn:
                             conn.execute(text("INSERT INTO classes (name, grade, notes, active) VALUES (:n, :g, :no, TRUE)"),
                                          {"n": nm, "g": new_grade.strip(), "no": new_notes.strip()})
-                        st.success(f"'{nm}'을 만들었어요. 이어서 ② 수업 시간, ③ 학생 배정을 해 주세요.")
+                        st.session_state["flash"] = "✅ " + f"'{nm}'을 만들었어요. 이어서 ② 수업 시간, ③ 학생 배정을 해 주세요."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                         st.rerun()
 
         with c_edit:
@@ -2351,7 +2353,7 @@ elif menu == MENU_CLASS:
                             with engine.begin() as conn:
                                 conn.execute(text("UPDATE classes SET name=:n, grade=:g, notes=:no, active=:a WHERE id=:id"),
                                              {"n": nm, "g": e_grade.strip(), "no": e_notes.strip(), "a": e_active, "id": ed_id})
-                            st.success("반 정보를 수정했어요.")
+                            st.session_state["flash"] = "✅ " + "반 정보를 수정했어요."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                             st.rerun()
                     if del_cls:
                         if not confirm_cls_del:
@@ -2359,7 +2361,7 @@ elif menu == MENU_CLASS:
                         else:
                             with engine.begin() as conn:
                                 conn.execute(text("DELETE FROM classes WHERE id = :id"), {"id": ed_id})
-                            st.success("반을 삭제했어요.")
+                            st.session_state["flash"] = "✅ " + "반을 삭제했어요."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                             st.rerun()
 
     # ---- ② 수업 시간 ----
@@ -2406,7 +2408,7 @@ elif menu == MENU_CLASS:
                                     INSERT INTO class_schedules (class_id, weekday, start_time, end_time)
                                     VALUES (:c, :w, :s, :e)
                                 """), {"c": sc_id, "w": wd, "s": s_str, "e": e_str})
-                            st.success(f"{wd_label} {s_str}~{e_str} 추가했어요.")
+                            st.session_state["flash"] = "✅ " + f"{wd_label} {s_str}~{e_str} 추가했어요."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                             st.rerun()
 
     # ---- ③ 학생 배정 ----
