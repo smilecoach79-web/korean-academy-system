@@ -121,6 +121,18 @@ def init_db():
             "class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL", "quiz_format TEXT DEFAULT ''",
         ]:
             conn.execute(text(f"ALTER TABLE scores ADD COLUMN IF NOT EXISTS {col_sql};"))
+        # [수정 27] 보강·휴강 일정 (정규 시간표와 별개로 특정 날짜에만)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS class_events (
+                id SERIAL PRIMARY KEY,
+                class_id INTEGER REFERENCES classes (id) ON DELETE CASCADE,
+                event_date TEXT NOT NULL,
+                kind TEXT NOT NULL,            -- '보강' 또는 '휴강'
+                start_time TEXT,
+                end_time TEXT,
+                memo TEXT DEFAULT ''
+            );
+        """))
         # [수정 25] 출결과 함께 과제 검사 결과 (완료 / 미흡 / 안 함)
         conn.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS homework_status TEXT DEFAULT '';"))
         # [수정 19] 수업 일지: 반 + 날짜마다 수업 내용, 과제, 제출일
@@ -197,6 +209,43 @@ def sv(v, default=""):
         pass
     v = str(v)
     return v if v.strip() else default
+
+
+SESSION_COLS = ["date", "class_id", "name", "start_time", "end_time", "kind", "memo", "canceled", "event_id"]
+
+
+def load_sessions(start_d, end_d):
+    """[수정 27] 날짜별 실제 수업 = 정규 시간표 + 보강 (휴강은 canceled=True로 표시)"""
+    with engine.connect() as conn:
+        reg = pd.read_sql_query("""
+            SELECT s.class_id, c.name, s.weekday, s.start_time, s.end_time
+            FROM class_schedules s JOIN classes c ON c.id = s.class_id WHERE c.active
+        """, conn)
+        ev = pd.read_sql_query(text("""
+            SELECT e.id AS event_id, e.class_id, c.name, e.event_date, e.kind, e.start_time, e.end_time, e.memo
+            FROM class_events e JOIN classes c ON c.id = e.class_id
+            WHERE c.active AND e.event_date BETWEEN :a AND :b
+        """), conn, params={"a": str(start_d), "b": str(end_d)})
+    rows = []
+    d = start_d
+    while d <= end_d:
+        ds = str(d)
+        day_ev = ev[ev["event_date"] == ds]
+        cancels = day_ev[day_ev["kind"] == "휴강"]
+        for r in reg[reg["weekday"] == d.weekday()].itertuples():
+            cx = cancels[cancels["class_id"] == r.class_id]
+            rows.append(dict(date=ds, class_id=int(r.class_id), name=r.name, start_time=r.start_time,
+                             end_time=r.end_time, kind="정규", memo=sv(cx.iloc[0]["memo"]) if not cx.empty else "",
+                             canceled=not cx.empty, event_id=int(cx.iloc[0]["event_id"]) if not cx.empty else None))
+        for r in day_ev[day_ev["kind"] == "보강"].itertuples():
+            rows.append(dict(date=ds, class_id=int(r.class_id), name=r.name, start_time=sv(r.start_time),
+                             end_time=sv(r.end_time), kind="보강", memo=sv(r.memo), canceled=False,
+                             event_id=int(r.event_id)))
+        d += timedelta(days=1)
+    out = pd.DataFrame(rows, columns=SESSION_COLS)
+    if out.empty:
+        return out
+    return out.sort_values(["date", "start_time", "name"]).reset_index(drop=True)
 
 
 def fmt_score(score, max_score):
@@ -458,12 +507,6 @@ if menu == MENU_TODAY:
 
     with engine.connect() as conn:
         active = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY group_name, name", conn)
-        today_classes = pd.read_sql_query(text("""
-            SELECT c.id, c.name, s.start_time, s.end_time
-            FROM class_schedules s JOIN classes c ON c.id = s.class_id
-            WHERE c.active AND s.weekday = :wd
-            ORDER BY s.start_time, c.name
-        """), conn, params={"wd": t.weekday()})
         class_roster = pd.read_sql_query(f"""
             SELECT cm.class_id, cm.member_id
             FROM class_members cm JOIN members m ON m.id = cm.member_id
@@ -494,6 +537,13 @@ if menu == MENU_TODAY:
         if not recent_scores.empty:
             recent_scores["점수"] = [fmt_score(a, b) for a, b in zip(recent_scores["score"], recent_scores["max_score"])]
 
+    # [수정 27] 오늘 실제 수업 = 정규 + 보강 - 휴강
+    sess_today = load_sessions(t, t)
+    canceled_today = sess_today[sess_today["canceled"]]
+    today_classes = sess_today[~sess_today["canceled"]].rename(columns={"class_id": "id"}).reset_index(drop=True)
+    upcoming = load_sessions(t + timedelta(days=1), t + timedelta(days=7))
+    upcoming = upcoming[(upcoming["kind"] == "보강") | (upcoming["canceled"])] if not upcoming.empty else upcoming
+
     # 오늘 출석해야 하는 학생: 오늘 수업이 있으면 그 반 학생들, 없으면 재원생 전체
     if not today_classes.empty:
         expected_ids = set(class_roster[class_roster["class_id"].isin(today_classes["id"])]["member_id"])
@@ -513,8 +563,20 @@ if menu == MENU_TODAY:
 
     with col_l:
         st.subheader("📚 오늘 수업")
+        # [수정 27] 다가오는 일주일 보강·휴강 미리 알림
+        if not upcoming.empty:
+            lines = []
+            for u in upcoming.itertuples():
+                ud = datetime.strptime(u.date, "%Y-%m-%d").date()
+                tag = "🔁 보강" if u.kind == "보강" else "🚫 휴강"
+                lines.append(f"{tag} · {ud.month}/{ud.day}({WEEKDAYS[ud.weekday()]}) {u.start_time} {u.name}"
+                             + (f" — {u.memo}" if u.memo else ""))
+            st.info(md("**📌 다가오는 보강·휴강**  \n" + "  \n".join(lines)))
+        if not canceled_today.empty:
+            st.caption(md("🚫 오늘 휴강: " + ", ".join(
+                f"{c.start_time} {c.name}" + (f" ({c.memo})" if c.memo else "") for c in canceled_today.itertuples())))
         if today_classes.empty:
-            st.info("오늘은 등록된 수업이 없습니다. '반·시간표 관리'에서 수업 시간을 등록하면 여기에 나타나요.")
+            st.info("오늘은 수업이 없습니다. '반·시간표 관리'에서 정규 시간을, '내 시간표'에서 보강을 잡을 수 있어요.")
         else:
             # [수정 19] 반별 수업 기록: 오늘 기록 여부 + 지난 시간 과제
             with engine.connect() as conn:
@@ -530,7 +592,10 @@ if menu == MENU_TODAY:
                 done = len(set(att_today[att_today["class_id"] == r.id]["member_id"])) if not att_today.empty else 0
                 with st.container(border=True):
                     a, b = st.columns([3, 1.3])
-                    a.markdown(md(f"**{r.start_time}~{r.end_time}**　{r.name}"))
+                    a.markdown(md(f"**{r.start_time}~{r.end_time}**　{r.name}"
+                                  + ("　`🔁 보강`" if r.kind == "보강" else "")))
+                    if r.kind == "보강" and r.memo:
+                        a.caption(md(f"보강 메모: {r.memo}"))
                     if done == 0:
                         a.caption(f"학생 {len(roster_ids)}명 · 출결 미입력")
                     elif done >= len(roster_ids):
@@ -829,6 +894,8 @@ elif menu == MENU_ATT:
         with engine.connect() as conn:
             classes_df = pd.read_sql_query("SELECT id, name FROM classes WHERE active ORDER BY name", conn)
             sched_df = pd.read_sql_query("SELECT class_id, weekday, start_time, end_time FROM class_schedules ORDER BY weekday, start_time", conn)
+            today_mk = pd.read_sql_query(text("SELECT class_id FROM class_events WHERE kind = '보강' AND event_date = :d"),
+                                         conn, params={"d": str(today_kst())})
 
         if classes_df.empty:
             st.info("'반·시간표 관리'에서 반을 만들고 학생을 배정하면, 여기서 반 학생 전체 출결을 한 번에 입력할 수 있어요.")
@@ -837,7 +904,7 @@ elif menu == MENU_ATT:
             names = list(cls_opts.keys())
             # 처음 들어왔을 때는 오늘 수업이 있는 반을 먼저 골라 둠
             if st.session_state.get("bulk_class") not in names:
-                today_ids = set(sched_df[sched_df["weekday"] == today_kst().weekday()]["class_id"])
+                today_ids = set(sched_df[sched_df["weekday"] == today_kst().weekday()]["class_id"]) | set(today_mk["class_id"])
                 today_names = [n for n in names if cls_opts[n] in today_ids]
                 st.session_state["bulk_class"] = today_names[0] if today_names else names[0]
             if "bulk_date" not in st.session_state:
@@ -849,12 +916,27 @@ elif menu == MENU_ATT:
             cid = cls_opts[cname]
 
             my_sched = sched_df[sched_df["class_id"] == cid]
+            # [수정 27] 이 날짜가 보강·휴강으로 잡혀 있는지
+            with engine.connect() as conn:
+                day_ev = pd.read_sql_query(text(
+                    "SELECT kind, start_time, end_time, memo FROM class_events WHERE class_id = :c AND event_date = :d"
+                ), conn, params={"c": cid, "d": str(bdate)})
+            mk_ev, cx_ev = day_ev[day_ev["kind"] == "보강"], day_ev[day_ev["kind"] == "휴강"]
             if my_sched.empty:
                 st.caption("수업 시간이 아직 등록되지 않은 반입니다.")
             else:
                 st.caption(md(f"수업 시간: {schedule_text(my_sched)}"))
-                if bdate.weekday() not in set(my_sched["weekday"]):
-                    st.warning(f"{bdate.strftime('%m월 %d일')}({WEEKDAYS[bdate.weekday()]})은 이 반의 정규 수업 요일이 아닙니다. 보강이라면 그대로 저장해도 됩니다.")
+            if not mk_ev.empty:
+                e0 = mk_ev.iloc[0]
+                st.info(md(f"🔁 **보강 수업**으로 잡혀 있는 날이에요 · {sv(e0['start_time'])}~{sv(e0['end_time'])}"
+                           + (f" · {sv(e0['memo'])}" if sv(e0["memo"]) else "")))
+            elif not cx_ev.empty:
+                st.warning(md("🚫 이 날은 **휴강**으로 등록돼 있어요."
+                              + (f" ({sv(cx_ev.iloc[0]['memo'])})" if sv(cx_ev.iloc[0]["memo"]) else "")
+                              + " 그래도 수업했다면 그대로 저장해도 됩니다."))
+            elif not my_sched.empty and bdate.weekday() not in set(my_sched["weekday"]):
+                st.warning(f"{bdate.strftime('%m월 %d일')}({WEEKDAYS[bdate.weekday()]})은 이 반의 정규 수업 요일이 아니에요. "
+                           "보강이라면 그대로 저장해도 되고, '내 시간표'에서 보강으로 미리 잡아 둘 수도 있어요.")
 
             with engine.connect() as conn:
                 roster = pd.read_sql_query(text("""
@@ -1738,15 +1820,8 @@ elif menu == MENU_PORTFOLIO:
 # 7. 내 시간표 [수정 15]
 elif menu == MENU_TIMETABLE:
     st.header("🗓️ 내 시간표")
+    t0 = today_kst()
     with engine.connect() as conn:
-        tt = pd.read_sql_query(f"""
-            SELECT s.weekday, s.start_time, s.end_time, c.id AS class_id, c.name, c.grade,
-                   (SELECT COUNT(*) FROM class_members cm JOIN members m ON m.id = cm.member_id
-                     WHERE cm.class_id = c.id AND (m.status = '재원' OR m.status IS NULL)) AS n
-            FROM class_schedules s JOIN classes c ON c.id = s.class_id
-            WHERE c.active
-            ORDER BY s.weekday, s.start_time
-        """, conn)
         # [수정 20] 반별 학생 이름 (마우스를 올리면 보여 줄 목록)
         tt_names = pd.read_sql_query("""
             SELECT cm.class_id, m.name, m.group_name
@@ -1754,18 +1829,131 @@ elif menu == MENU_TIMETABLE:
             WHERE m.status = '재원' OR m.status IS NULL
             ORDER BY m.name
         """, conn)
+        tt_cls = pd.read_sql_query("SELECT id, name FROM classes WHERE active ORDER BY name", conn)
+        tt_sched = pd.read_sql_query("SELECT class_id, weekday, start_time, end_time FROM class_schedules", conn)
     names_map = {cid: list(g["name"]) for cid, g in tt_names.groupby("class_id")}
 
-    if tt.empty:
-        st.info("아직 등록된 수업이 없습니다. '반·시간표 관리'에서 반과 수업 시간을 등록해 주세요.")
+    def minutes(hhmm):
+        h, m = hhmm.split(":")
+        return int(h) * 60 + int(m)
+
+    # ---------- [수정 27] 보강·휴강 잡기 ----------
+    with st.expander("🔁 보강 · 휴강 일정 잡기 / 관리", expanded=False):
+        if tt_cls.empty:
+            st.caption("먼저 '반·시간표 관리'에서 반을 만들어 주세요.")
+        else:
+            ev_opts = {r["name"]: int(r["id"]) for _, r in tt_cls.iterrows()}
+            e1, e2, e3 = st.columns([2, 1.2, 1])
+            ev_cname = e1.selectbox("반", list(ev_opts.keys()), key="ev_cls")
+            ev_kind = e2.radio("종류", ["보강", "휴강"], horizontal=True, key="ev_kind",
+                               help="보강: 정규 시간 외에 수업을 더 함 / 휴강: 그날 정규 수업을 쉼")
+            ev_date = e3.date_input("날짜", t0 + timedelta(days=1), key="ev_date")
+            ev_cid = ev_opts[ev_cname]
+            reg_day = tt_sched[(tt_sched["class_id"] == ev_cid) & (tt_sched["weekday"] == ev_date.weekday())]
+            ev_label = f"{ev_date.month}/{ev_date.day}({WEEKDAYS[ev_date.weekday()]})"
+
+            if ev_kind == "보강":
+                s1, s2 = st.columns(2)
+                ev_s = s1.time_input("시작", dtime(17, 30), step=300, key="ev_start")
+                ev_e = s2.time_input("종료", dtime(19, 0), step=300, key="ev_end")
+                ev_memo = st.text_input("메모 (선택)", placeholder="11/12 휴강분 보강, 내신 대비 특강 등", key="ev_memo_mk")
+            else:
+                if reg_day.empty:
+                    st.warning(f"{ev_label}에는 이 반의 정규 수업이 없어요. 날짜를 확인해 주세요.")
+                else:
+                    st.caption(md(f"{ev_label} 정규 수업: " + ", ".join(f"{r.start_time}~{r.end_time}" for r in reg_day.itertuples())
+                                  + " → 이 수업을 쉬는 것으로 표시돼요."))
+                ev_memo = st.text_input("메모 (선택)", placeholder="학교 행사, 시험 기간, 강사 일정 등", key="ev_memo_cx")
+
+            if st.button(f"💾 {ev_cname} {ev_label} {ev_kind} 저장", type="primary", key="ev_save"):
+                ds = str(ev_date)
+                with engine.connect() as conn:
+                    same = pd.read_sql_query(text(
+                        "SELECT start_time FROM class_events WHERE class_id = :c AND event_date = :d AND kind = :k"
+                    ), conn, params={"c": ev_cid, "d": ds, "k": ev_kind})
+                if ev_kind == "보강":
+                    s_str, e_str = ev_s.strftime("%H:%M"), ev_e.strftime("%H:%M")
+                    day_sess = load_sessions(ev_date, ev_date)
+                    day_sess = day_sess[~day_sess["canceled"]] if not day_sess.empty else day_sess
+                    clash = day_sess[(day_sess["start_time"] < e_str) & (day_sess["end_time"] > s_str)] if not day_sess.empty else day_sess
+                    if e_str <= s_str:
+                        st.warning("종료 시각이 시작 시각보다 늦어야 해요. (오후 7시는 19:00)")
+                    elif not clash.empty:
+                        st.warning("같은 시간에 다른 수업이 있어요: " + ", ".join(
+                            f"{c.start_time}~{c.end_time} {c.name}" for c in clash.itertuples()))
+                    elif s_str in set(same["start_time"]):
+                        st.warning("이미 같은 보강이 저장돼 있어요.")
+                    else:
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                INSERT INTO class_events (class_id, event_date, kind, start_time, end_time, memo)
+                                VALUES (:c, :d, '보강', :s, :e, :m)
+                            """), {"c": ev_cid, "d": ds, "s": s_str, "e": e_str, "m": ev_memo.strip()})
+                        st.session_state["flash"] = f"🔁 {ev_cname} {ev_label} {s_str} 보강을 잡았어요."
+                        st.rerun()
+                else:
+                    if reg_day.empty:
+                        st.warning(f"{ev_label}에는 이 반의 정규 수업이 없어서 휴강으로 잡을 수 없어요.")
+                    elif not same.empty:
+                        st.warning("이미 휴강으로 잡혀 있어요.")
+                    else:
+                        with engine.begin() as conn:
+                            conn.execute(text("""
+                                INSERT INTO class_events (class_id, event_date, kind, start_time, end_time, memo)
+                                VALUES (:c, :d, '휴강', NULL, NULL, :m)
+                            """), {"c": ev_cid, "d": ds, "m": ev_memo.strip()})
+                        st.session_state["flash"] = f"🚫 {ev_cname} {ev_label} 휴강으로 표시했어요."
+                        st.rerun()
+
+            st.markdown("**다가오는 보강 · 휴강**")
+            with engine.connect() as conn:
+                ev_list = pd.read_sql_query(text("""
+                    SELECT e.id, e.event_date, e.kind, c.name, e.start_time, e.end_time, e.memo
+                    FROM class_events e JOIN classes c ON c.id = e.class_id
+                    WHERE e.event_date >= :t ORDER BY e.event_date, e.start_time
+                """), conn, params={"t": str(t0)})
+            if ev_list.empty:
+                st.caption("잡혀 있는 보강·휴강이 없어요.")
+            else:
+                def _dlabel(x):
+                    d_ = datetime.strptime(x, "%Y-%m-%d").date()
+                    return f"{d_.month}/{d_.day}({WEEKDAYS[d_.weekday()]})"
+                ev_view = pd.DataFrame({
+                    "날짜": [_dlabel(x) for x in ev_list["event_date"]],
+                    "종류": ["🔁 보강" if k == "보강" else "🚫 휴강" for k in ev_list["kind"]],
+                    "반": ev_list["name"],
+                    "시간": [f"{sv(a)}~{sv(b)}" if sv(a) else "정규 시간" for a, b in zip(ev_list["start_time"], ev_list["end_time"])],
+                    "메모": ev_list["memo"].fillna(""),
+                })
+                st.caption("👆 지우려면 맨 왼쪽 네모 칸을 누르세요.")
+                ev_pick = st.dataframe(ev_view, hide_index=True, width="stretch",
+                                       on_select="rerun", selection_mode="single-row", key="ev_tbl")
+                if ev_pick.selection.rows:
+                    er = ev_list.iloc[ev_pick.selection.rows[0]]
+                    if st.button(f"🗑️ {_dlabel(er['event_date'])} {er['name']} {er['kind']} 일정 삭제", key="ev_del"):
+                        with engine.begin() as conn:
+                            conn.execute(text("DELETE FROM class_events WHERE id = :id"), {"id": int(er["id"])})
+                        st.session_state["flash"] = "🗑️ 일정을 지웠어요."
+                        st.rerun()
+
+    # ---------- 주간 시간표 (실제 날짜 기준) ----------
+    wk = st.radio("보기", ["이번 주", "다음 주"], horizontal=True, key="tt_week", label_visibility="collapsed")
+    monday = t0 - timedelta(days=t0.weekday()) + timedelta(days=7 if wk == "다음 주" else 0)
+    sunday = monday + timedelta(days=6)
+    sess = load_sessions(monday, sunday)
+
+    if sess.empty:
+        st.info("이 주에는 수업이 없습니다. '반·시간표 관리'에서 반과 수업 시간을 등록해 주세요.")
     else:
-        def minutes(hhmm):
-            h, m = hhmm.split(":")
-            return int(h) * 60 + int(m)
-        total_min = sum(minutes(r.end_time) - minutes(r.start_time) for r in tt.itertuples())
+        live = sess[~sess["canceled"]]
+        total_min = sum(minutes(r.end_time) - minutes(r.start_time) for r in live.itertuples() if r.start_time and r.end_time)
+        n_mk = int((sess["kind"] == "보강").sum())
+        n_cx = int(sess["canceled"].sum())
         cap_col, tog_col = st.columns([3, 1])
-        cap_col.caption(f"주간 수업 {len(tt)}회 · 반 {tt['class_id'].nunique()}개 · 총 {total_min // 60}시간 {total_min % 60}분"
-                        " · 카드에 마우스를 올리면 학생 이름이 보여요")
+        cap_col.caption(
+            f"{monday.month}/{monday.day} ~ {sunday.month}/{sunday.day} · 수업 {len(live)}회 · 총 {total_min // 60}시간 {total_min % 60}분"
+            + (f" · 🔁 보강 {n_mk}" if n_mk else "") + (f" · 🚫 휴강 {n_cx}" if n_cx else "")
+            + " · 카드에 마우스를 올리면 학생 이름이 보여요")
         show_names = tog_col.toggle("학생 이름 펼쳐 보기", key="tt_show_names",
                                     help="휴대폰처럼 마우스가 없을 때 켜 두면 카드에 이름이 바로 보여요.")
 
@@ -1788,6 +1976,7 @@ elif menu == MENU_TIMETABLE:
         .tt-card:hover .tt-pop, .tt-card:focus .tt-pop { display: block; }
         .tt-names { margin-top: 6px; padding-top: 6px; border-top: 1px dashed #d5d9e0;
                     font-size: 0.78rem; color: #31333f; line-height: 1.55; word-break: keep-all; }
+        .tt-tag { display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-bottom: 3px; }
         [data-testid="stColumn"], [data-testid="column"] { overflow: visible !important; }
         /* 마우스를 올린 카드를 아래 카드보다 위로 올려서 말풍선이 가려지지 않게 */
         [data-testid="stElementContainer"]:has(.tt-card:hover),
@@ -1796,34 +1985,44 @@ elif menu == MENU_TIMETABLE:
         </style>
         """, unsafe_allow_html=True)
 
-        today_wd = today_kst().weekday()
         cols = st.columns(7)
-        for wd in range(7):
-            with cols[wd]:
-                is_today = wd == today_wd
+        for i in range(7):
+            d = monday + timedelta(days=i)
+            with cols[i]:
+                is_today = d == t0
                 head_bg = "#ff4b4b" if is_today else "#e8eaf0"
                 head_fg = "#ffffff" if is_today else "#31333f"
                 st.markdown(
-                    f"<div style='text-align:center;padding:8px 0;border-radius:10px;background:{head_bg};"
-                    f"color:{head_fg};font-weight:700;margin-bottom:8px'>{WEEKDAYS[wd]}{' · 오늘' if is_today else ''}</div>",
+                    f"<div style='text-align:center;padding:6px 0;border-radius:10px;background:{head_bg};"
+                    f"color:{head_fg};font-weight:700;margin-bottom:8px;line-height:1.3'>{WEEKDAYS[i]}{' · 오늘' if is_today else ''}"
+                    f"<div style='font-size:0.75rem;font-weight:500;opacity:0.85'>{d.month}/{d.day}</div></div>",
                     unsafe_allow_html=True)
-                day = tt[tt["weekday"] == wd]
+                day = sess[sess["date"] == str(d)]
                 if day.empty:
                     st.markdown("<div style='text-align:center;color:#a3a8b8;font-size:0.85rem;padding:12px 0'>수업 없음</div>",
                                 unsafe_allow_html=True)
                 for r in day.itertuples():
-                    border = "#ff4b4b" if is_today else "#8b93a7"
                     stu = names_map.get(r.class_id, [])
                     stu_txt = ", ".join(html.escape(n) for n in stu) if stu else "배정된 학생이 없어요"
+                    memo_html = f"<br>📝 {html.escape(r.memo)}" if r.memo else ""
+                    if r.canceled:
+                        border, bg, tag = "#c3c8d1", "#f4f5f8", "<span class='tt-tag' style='background:#e3e6ee;color:#5f6475'>🚫 휴강</span><br>"
+                        name_html = f"<span style='text-decoration:line-through;color:#8b93a7'>{html.escape(r.name)}</span>"
+                    elif r.kind == "보강":
+                        border, bg, tag = "#f2a33a", "#fffaf2", "<span class='tt-tag' style='background:#fde9c8;color:#8a4b00'>🔁 보강</span><br>"
+                        name_html = html.escape(r.name)
+                    else:
+                        border, bg, tag = ("#ff4b4b" if is_today else "#8b93a7"), "#ffffff", ""
+                        name_html = html.escape(r.name)
                     # 이름을 펼쳐 둔 상태면 카드 안에, 아니면 마우스를 올렸을 때 말풍선으로
-                    names_block = (f"<div class='tt-names'>{stu_txt}</div>" if show_names else
-                                   f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}</div>")
+                    names_block = (f"<div class='tt-names'>{stu_txt}{memo_html}</div>" if show_names else
+                                   f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}{memo_html}</div>")
                     st.markdown(
                         f"<div class='tt-card' tabindex='0' style='border:1px solid #d5d9e0;border-left:5px solid {border};border-radius:8px;"
-                        f"padding:8px 10px;margin-bottom:8px;background:#ffffff;box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
-                        f"<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
-                        f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{html.escape(r.name)}</div>"
-                        f"<div style='font-size:0.78rem;color:#808495'>학생 {r.n}명</div>{names_block}</div>",
+                        f"padding:8px 10px;margin-bottom:8px;background:{bg};box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
+                        f"{tag}<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
+                        f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{name_html}</div>"
+                        f"<div style='font-size:0.78rem;color:#808495'>학생 {len(stu)}명</div>{names_block}</div>",
                         unsafe_allow_html=True)
 
 # 8. 반·시간표 관리 [수정 12]
@@ -2145,5 +2344,24 @@ elif menu == MENU_BACKUP:
         label="📥 수업 일지 CSV 다운로드",
         data=csv_bytes(df_exp_lessons),
         file_name=f"국어학원_수업일지_{today_kst()}.csv",
+        mime="text/csv"
+    )
+
+    st.divider()
+
+    # [수정 27] 보강·휴강 일정 백업
+    st.subheader("7️⃣ 보강 · 휴강 일정")
+    with engine.connect() as conn:
+        df_exp_events = pd.read_sql_query("""
+            SELECT e.event_date AS 날짜, e.kind AS 종류, c.name AS 반이름,
+                   e.start_time AS 시작, e.end_time AS 종료, e.memo AS 메모
+            FROM class_events e JOIN classes c ON c.id = e.class_id
+            ORDER BY e.event_date DESC
+        """, conn)
+    st.dataframe(df_exp_events.fillna(""), hide_index=True, width="stretch")
+    st.download_button(
+        label="📥 보강·휴강 일정 CSV 다운로드",
+        data=csv_bytes(df_exp_events),
+        file_name=f"국어학원_보강휴강_{today_kst()}.csv",
         mime="text/csv"
     )
