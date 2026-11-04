@@ -1,4 +1,5 @@
 import html
+import altair as alt
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta, timezone
@@ -112,6 +113,14 @@ def init_db():
         """))
         # 출결이 어느 반 수업인지 기록 (반을 지워도 출결 기록은 남도록 SET NULL)
         conn.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL;"))
+        # [수정 21] 시험 종류별 성적: 기존 성적은 자동으로 '모의고사'로 분류됨
+        for col_sql in [
+            "exam_type TEXT DEFAULT '모의고사'", "max_score REAL DEFAULT 100", "grade TEXT DEFAULT ''",
+            "percentile REAL", "exam_scope TEXT DEFAULT ''", "school_term TEXT DEFAULT ''",
+            "objective_score REAL", "essay_score REAL", "school_avg REAL",
+            "class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL", "quiz_format TEXT DEFAULT ''",
+        ]:
+            conn.execute(text(f"ALTER TABLE scores ADD COLUMN IF NOT EXISTS {col_sql};"))
         # [수정 19] 수업 일지: 반 + 날짜마다 수업 내용, 과제, 제출일
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS lessons (
@@ -131,6 +140,55 @@ def init_db():
 init_db()
 
 WEEKDAYS = "월화수목금토일"
+
+# [수정 21] 시험 종류
+EXAM_TYPES = ["모의고사", "학교 내신", "수업 테스트", "기타"]
+EXAM_ICONS = {"모의고사": "📊", "학교 내신": "🏫", "수업 테스트": "✏️", "기타": "📁"}
+EXAM_HELP = {
+    "모의고사": "독서·문학·문법(선택과목) 점수와 등급·백분위를 기록해요.",
+    "학교 내신": "중간·기말고사 점수와 시험 범위, 객관식·서술형, 등급·성취도를 기록해요.",
+    "수업 테스트": "OX·빈칸·단답 테스트를 반 학생 전체 표로 한 번에 입력해요. 맞은 개수만 적으면 정답률이 자동 계산돼요.",
+    "기타": "사설 모의고사, 단원평가 등 점수와 만점만 기록해요.",
+}
+SCHOOL_TERMS = ["1학기 중간", "1학기 기말", "2학기 중간", "2학기 기말"]
+QUIZ_FORMATS = ["OX", "빈칸", "단답", "혼합"]
+SCORE_DEFAULTS = dict(feedback="", reading_score=None, literature_score=None, grammar_score=None,
+                      wrong_questions="", max_score=100.0, grade="", percentile=None, exam_scope="",
+                      school_term="", objective_score=None, essay_score=None, school_avg=None,
+                      class_id=None, quiz_format="")
+
+
+def trend_chart(d, ycols, y_title, y_max=None):
+    """성적 추이 그래프: 가로 날짜 라벨 + 점마다 점수 표시 [수정 21]"""
+    d = d.copy()
+    d["x"] = [f"{r[5:].replace('-', '/')}" for r in d["record_date"]]
+    # 같은 날 여러 시험이 있으면 라벨이 겹치지 않게 번호를 붙임
+    seen = {}
+    xs = []
+    for x in d["x"]:
+        seen[x] = seen.get(x, 0) + 1
+        xs.append(x if seen[x] == 1 else f"{x}({seen[x]})")
+    d["x"] = xs
+    long = d.melt(id_vars=["x", "category"], value_vars=ycols, var_name="구분", value_name="값").dropna(subset=["값"])
+    x_enc = alt.X("x:N", sort=list(d["x"]), title=None,
+                  axis=alt.Axis(labelAngle=0, labelFontSize=11, labelLimit=80))
+    y_scale = alt.Scale(domain=[0, y_max]) if y_max else alt.Scale(zero=True)
+    y_enc = alt.Y("값:Q", title=y_title, scale=y_scale)
+    color = alt.Color("구분:N", legend=alt.Legend(orient="top", title=None) if len(ycols) > 1 else None,
+                      scale=alt.Scale(range=["#e63c3c", "#8b93a7"]))
+    tip = [alt.Tooltip("x:N", title="날짜"), alt.Tooltip("category:N", title="시험"), alt.Tooltip("값:Q", title=y_title)]
+    base = alt.Chart(long).encode(x=x_enc, y=y_enc, color=color, tooltip=tip)
+    chart = (base.mark_line(point=alt.OverlayMarkDef(size=60), strokeWidth=2.5)
+             + base.mark_text(dy=-12, fontSize=11, fontWeight="bold").encode(text=alt.Text("값:Q", format=".0f")))
+    st.altair_chart(chart.properties(height=260), width="stretch")
+
+
+def fmt_score(score, max_score):
+    """84 / 100 처럼 점수 표시"""
+    if score is None or pd.isna(score):
+        return "-"
+    mx = 100 if max_score is None or pd.isna(max_score) else max_score
+    return f"{float(score):g} / {float(mx):g}"
 STATUS_OPTIONS = ["출석", "지각", "결석", "보강완료"]
 
 
@@ -368,10 +426,14 @@ if menu == MENU_TODAY:
             ORDER BY l.log_date DESC, l.id DESC LIMIT 5
         """, conn)
         recent_scores = pd.read_sql_query("""
-            SELECT s.record_date AS 일자, m.name AS 이름, s.category AS 평가명, s.score AS 총점
+            SELECT s.record_date AS 일자, COALESCE(s.exam_type, '모의고사') AS 종류, m.name AS 이름,
+                   s.category AS 시험, s.score, s.max_score
             FROM scores s JOIN members m ON s.member_id = m.id
             ORDER BY s.record_date DESC, s.id DESC LIMIT 5
         """, conn)
+        if not recent_scores.empty:
+            recent_scores["점수"] = [fmt_score(a, b) for a, b in zip(recent_scores["score"], recent_scores["max_score"])]
+            recent_scores = recent_scores.drop(columns=["score", "max_score"])
 
     # 오늘 출석해야 하는 학생: 오늘 수업이 있으면 그 반 학생들, 없으면 재원생 전체
     if not today_classes.empty:
@@ -880,139 +942,379 @@ elif menu == MENU_ATT:
             """, conn)
         st.dataframe(recent_att, hide_index=True, width="stretch")
 
-# 3. 국어 성적 및 평가 입력
+# 3. 성적 입력 — 시험 종류별 [수정 21]
 elif menu == MENU_SCORE:
-    st.header("3. 국어 성적 및 영역별 평가 분석 (통합 공통국어)")
+    st.header("📝 성적 및 국어 평가")
     with engine.connect() as conn:
-        # [수정 4] 퇴원생은 입력 목록에서 제외
         members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
 
     if members.empty:
         st.warning("먼저 학생을 등록해 주세요.")
     else:
-        col_sc_add, col_sc_edit = st.columns([1.2, 1])
-        member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": row['id'] for _, row in members.iterrows()}
+        member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": int(row['id']) for _, row in members.iterrows()}
+        ss = st.session_state
 
-        with col_sc_add:
-            with st.expander("➕ 새 국어 시험/평가 기록", expanded=True):
-                with st.form("score_form"):
-                    target_member = st.selectbox("학생 선택", list(member_dict.keys()), key="score_add_target")
-                    score_date = st.date_input("시험/평가 일자", today_kst(), key="score_add_date")
-                    category = st.text_input("평가 회차명 (예: 전국연합학력평가, 1학기 중간고사 국어)")
+        exam_type = st.radio("시험 종류", EXAM_TYPES, horizontal=True, key="exam_type_sel",
+                             format_func=lambda x: f"{EXAM_ICONS[x]} {x}")
+        st.caption(EXAM_HELP[exam_type])
 
-                    st.markdown("##### 📝 통합 국어 영역별 세부 득점")
-                    c_sc1, c_sc2, c_sc3 = st.columns(3)
-                    # [수정 3] 기본값을 0으로 (깜빡해도 가짜 점수가 저장되지 않도록)
-                    reading_sc = c_sc1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
-                    literature_sc = c_sc2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
-                    grammar_sc = c_sc3.number_input("문법·어휘/화법 점수", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
+        def insert_score(row):
+            data = dict(SCORE_DEFAULTS)
+            data.update(row)
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    INSERT INTO scores (member_id, record_date, category, score, feedback,
+                        reading_score, literature_score, grammar_score, wrong_questions,
+                        exam_type, max_score, grade, percentile, exam_scope, school_term,
+                        objective_score, essay_score, school_avg, class_id, quiz_format)
+                    VALUES (:member_id, :record_date, :category, :score, :feedback,
+                        :reading_score, :literature_score, :grammar_score, :wrong_questions,
+                        :exam_type, :max_score, :grade, :percentile, :exam_scope, :school_term,
+                        :objective_score, :essay_score, :school_avg, :class_id, :quiz_format)
+                """), data)
 
-                    calc_total = reading_sc + literature_sc + grammar_sc
-                    st.caption("※ 총점은 '평가 데이터 저장'을 누를 때 세 영역을 더해 저장됩니다.")
+        def already_saved(mid, d, cat, etype):
+            with engine.connect() as conn:
+                return conn.execute(text("""
+                    SELECT COUNT(*) FROM scores
+                    WHERE member_id = :m AND record_date = :d AND category = :c AND COALESCE(exam_type, '모의고사') = :t
+                """), {"m": mid, "d": str(d), "c": cat, "t": etype}).scalar() > 0
 
-                    wrong_q = st.text_input("주요 오답 문항 번호 / 취약 제재")
-                    feedback = st.text_area("국어 피드백 및 약점 처방")
-                    submit_score = st.form_submit_button("평가 데이터 저장")
+        def reset(values):
+            for k, v in values.items():
+                ss[k] = v
 
-                    if submit_score:
-                        if not category:
-                            st.warning("평가 회차명을 입력해 주세요.")
-                        elif calc_total == 0:
-                            st.warning("영역별 점수가 모두 0점입니다. 점수를 입력했는지 확인해 주세요.")
-                        else:
-                            m_id = member_dict[target_member]
-                            with engine.begin() as conn:
-                                conn.execute(text("""
-                                    INSERT INTO scores (
-                                        member_id, record_date, category, score, feedback,
-                                        reading_score, literature_score, grammar_score, wrong_questions
-                                    ) VALUES (
-                                        :m_id, :r_dt, :cat, :sc, :fb, :r_sc, :l_sc, :g_sc, :wq
-                                    )
-                                """), {
-                                    "m_id": m_id, "r_dt": str(score_date), "cat": category, "sc": calc_total, "fb": feedback,
-                                    "r_sc": reading_sc, "l_sc": literature_sc, "g_sc": grammar_sc, "wq": wrong_q
-                                })
-                            st.success(f"{category} (총점 {calc_total:.1f}점) 저장이 완료되었습니다.")
-                            st.rerun()
+        # ---------- ① 모의고사 ----------
+        def cb_mock():
+            cat = ss.mk_cat.strip()
+            total = (ss.mk_r or 0) + (ss.mk_l or 0) + (ss.mk_g or 0)
+            mid = member_dict[ss.mk_stu]
+            if not cat:
+                ss.sc_msg = "시험 이름을 입력해 주세요. (예: 11월 전국연합학력평가)"
+                return
+            if total == 0:
+                ss.sc_msg = "영역별 점수가 모두 0점이에요. 점수를 입력했는지 확인해 주세요."
+                return
+            if already_saved(mid, ss.mk_date, cat, "모의고사"):
+                ss.sc_msg = "이 학생의 같은 날짜·같은 시험 성적이 이미 있어요. 고치려면 아래 '저장된 성적 수정·삭제'를 이용하세요."
+                return
+            insert_score(dict(member_id=mid, record_date=str(ss.mk_date), category=cat, score=total,
+                              feedback=ss.mk_fb.strip(), reading_score=ss.mk_r, literature_score=ss.mk_l,
+                              grammar_score=ss.mk_g, wrong_questions=ss.mk_wrong.strip(), exam_type="모의고사",
+                              max_score=100.0, grade="" if ss.mk_grade == "-" else ss.mk_grade,
+                              percentile=ss.mk_pct))
+            ss.flash = f"📊 {ss.mk_stu.split('] ')[-1].split(' (ID')[0]} · {cat} {total:g}점 저장했어요."
+            # 시험 이름·날짜는 남겨 두고 점수 칸만 비워서, 다음 학생을 바로 입력할 수 있게
+            reset({"mk_r": 0.0, "mk_l": 0.0, "mk_g": 0.0, "mk_grade": "-", "mk_pct": None, "mk_wrong": "", "mk_fb": ""})
 
-        with col_sc_edit:
-            with st.expander("✏️/🗑️ 등록된 성적 수정 및 삭제", expanded=False):
+        # ---------- ② 학교 내신 ----------
+        def cb_school():
+            mid = member_dict[ss.ns_stu]
+            score = ss.ns_score
+            if score is None and (ss.ns_obj is not None or ss.ns_essay is not None):
+                score = (ss.ns_obj or 0) + (ss.ns_essay or 0)
+            if score is None:
+                ss.sc_msg = "점수를 입력해 주세요. (객관식·서술형만 적으면 합계가 점수가 됩니다)"
+                return
+            if score > ss.ns_max:
+                ss.sc_msg = f"점수({score:g})가 만점({ss.ns_max:g})보다 커요. 다시 확인해 주세요."
+                return
+            cat = f"{ss.ns_date.year} {ss.ns_term}" + (f" {ss.ns_subject.strip()}" if ss.ns_subject.strip() else "")
+            if already_saved(mid, ss.ns_date, cat, "학교 내신"):
+                ss.sc_msg = "이 학생의 같은 시험 성적이 이미 있어요. 고치려면 아래 '저장된 성적 수정·삭제'를 이용하세요."
+                return
+            insert_score(dict(member_id=mid, record_date=str(ss.ns_date), category=cat, score=score,
+                              feedback=ss.ns_fb.strip(), wrong_questions=ss.ns_wrong.strip(), exam_type="학교 내신",
+                              max_score=ss.ns_max, grade=ss.ns_grade.strip(), exam_scope=ss.ns_scope.strip(),
+                              school_term=ss.ns_term, objective_score=ss.ns_obj, essay_score=ss.ns_essay,
+                              school_avg=ss.ns_avg))
+            ss.flash = f"🏫 {ss.ns_stu.split('] ')[-1].split(' (ID')[0]} · {cat} {score:g}/{ss.ns_max:g}점 저장했어요."
+            # 학기·과목·범위·학교 평균은 남겨 두고 학생별 칸만 비움
+            reset({"ns_score": None, "ns_obj": None, "ns_essay": None, "ns_grade": "", "ns_wrong": "", "ns_fb": ""})
+
+        # ---------- ④ 기타 ----------
+        def cb_etc():
+            mid = member_dict[ss.et_stu]
+            cat = ss.et_cat.strip()
+            if not cat:
+                ss.sc_msg = "시험 이름을 입력해 주세요."
+                return
+            if ss.et_score is None:
+                ss.sc_msg = "점수를 입력해 주세요."
+                return
+            if ss.et_score > ss.et_max:
+                ss.sc_msg = f"점수({ss.et_score:g})가 만점({ss.et_max:g})보다 커요."
+                return
+            if already_saved(mid, ss.et_date, cat, "기타"):
+                ss.sc_msg = "이 학생의 같은 시험 성적이 이미 있어요."
+                return
+            insert_score(dict(member_id=mid, record_date=str(ss.et_date), category=cat, score=ss.et_score,
+                              max_score=ss.et_max, feedback=ss.et_fb.strip(), exam_type="기타",
+                              exam_scope=ss.et_scope.strip()))
+            ss.flash = f"📁 {cat} {ss.et_score:g}/{ss.et_max:g}점 저장했어요."
+            reset({"et_score": None, "et_fb": ""})
+
+        for k, v in {"mk_r": 0.0, "mk_l": 0.0, "mk_g": 0.0, "mk_pct": None,
+                     "ns_score": None, "ns_obj": None, "ns_essay": None, "et_score": None}.items():
+            ss.setdefault(k, v)
+
+        st.markdown(f"#### {EXAM_ICONS[exam_type]} {exam_type} 성적 입력")
+
+        if exam_type == "모의고사":
+            with st.form("form_mock"):
+                c1, c2 = st.columns([2, 1])
+                c1.selectbox("학생 선택", list(member_dict.keys()), key="mk_stu")
+                c2.date_input("시험 일자", today_kst(), key="mk_date")
+                st.text_input("시험 이름 *", placeholder="11월 전국연합학력평가", key="mk_cat")
+                a, b, c = st.columns(3)
+                a.number_input("독서", min_value=0.0, max_value=100.0, step=0.5, key="mk_r")
+                b.number_input("문학", min_value=0.0, max_value=100.0, step=0.5, key="mk_l")
+                c.number_input("문법·화법 (선택과목)", min_value=0.0, max_value=100.0, step=0.5, key="mk_g")
+                e1, e2 = st.columns(2)
+                e1.selectbox("등급", ["-"] + [f"{i}등급" for i in range(1, 10)], key="mk_grade")
+                e2.number_input("백분위 (선택)", min_value=0.0, max_value=100.0, step=1.0, key="mk_pct")
+                st.text_input("틀린 문항 번호 / 취약 제재", key="mk_wrong")
+                st.text_area("피드백 및 처방", key="mk_fb", height=80)
+                st.caption("총점은 세 영역을 더해 저장돼요. 저장하면 시험 이름·날짜는 남고 점수 칸만 비워져서 다음 학생을 바로 입력할 수 있어요.")
+                st.form_submit_button("💾 모의고사 성적 저장", type="primary", on_click=cb_mock)
+
+        elif exam_type == "학교 내신":
+            with st.form("form_school"):
+                c1, c2 = st.columns([2, 1])
+                c1.selectbox("학생 선택", list(member_dict.keys()), key="ns_stu")
+                c2.date_input("시험 일자", today_kst(), key="ns_date")
+                t1, t2 = st.columns(2)
+                t1.selectbox("시험", SCHOOL_TERMS, index=3, key="ns_term")
+                t2.text_input("과목", placeholder="공통국어2 / 문학 / 독서와 작문", key="ns_subject")
+                st.text_area("시험 범위", placeholder="공통국어2 3단원 (관동별곡 ~ 사미인곡), 학습지 1~12", key="ns_scope", height=68)
+                s1, s2, s3, s4 = st.columns(4)
+                s1.number_input("점수 *", min_value=0.0, max_value=200.0, step=0.5, key="ns_score")
+                s2.number_input("만점", min_value=1.0, max_value=200.0, value=100.0, step=1.0, key="ns_max")
+                s3.number_input("객관식 (선택)", min_value=0.0, max_value=200.0, step=0.5, key="ns_obj")
+                s4.number_input("서술형 (선택)", min_value=0.0, max_value=200.0, step=0.5, key="ns_essay")
+                g1, g2 = st.columns(2)
+                g1.text_input("등급 / 성취도 (선택)", placeholder="2등급, B 등", key="ns_grade")
+                g2.number_input("학교 평균 (선택)", min_value=0.0, max_value=200.0, value=None, step=0.1, key="ns_avg")
+                st.text_input("틀린 문항 / 취약 부분", key="ns_wrong")
+                st.text_area("피드백 및 처방", key="ns_fb", height=80)
+                st.caption("저장하면 시험·과목·범위·학교 평균은 남고 학생별 칸만 비워져요.")
+                st.form_submit_button("💾 내신 성적 저장", type="primary", on_click=cb_school)
+
+        elif exam_type == "수업 테스트":
+            with engine.connect() as conn:
+                qz_classes = pd.read_sql_query("SELECT id, name FROM classes WHERE active ORDER BY name", conn)
+                qz_sched = pd.read_sql_query("SELECT class_id, weekday FROM class_schedules", conn)
+            if qz_classes.empty:
+                st.info("'반·시간표 관리'에서 반을 만들고 학생을 배정하면, 반 학생 전체 테스트 점수를 한 번에 입력할 수 있어요.")
+            else:
+                q_opts = {r["name"]: int(r["id"]) for _, r in qz_classes.iterrows()}
+                q_names = list(q_opts.keys())
+                if ss.get("qz_class") not in q_names:
+                    today_ids = set(qz_sched[qz_sched["weekday"] == today_kst().weekday()]["class_id"])
+                    t_names = [n for n in q_names if q_opts[n] in today_ids]
+                    ss.qz_class = t_names[0] if t_names else q_names[0]
+                k1, k2 = st.columns([2, 1])
+                q_cname = k1.selectbox("반 선택", q_names, key="qz_class")
+                q_date = k2.date_input("테스트 날짜", today_kst(), key="qz_date")
+                q_cid = q_opts[q_cname]
+                m1, m2, m3 = st.columns([2, 1, 1])
+                q_name = m1.text_input("테스트 이름 / 범위 *", placeholder="관동별곡 어휘 OX", key="qz_name").strip()
+                q_fmt = m2.selectbox("유형", QUIZ_FORMATS, key="qz_fmt")
+                q_total = m3.number_input("전체 문항 수", min_value=1, max_value=200, value=10, step=1, key="qz_total")
+
                 with engine.connect() as conn:
-                    scores_for_edit = pd.read_sql_query("""
-                        SELECT s.id, s.record_date, s.category, s.score, s.feedback,
-                               s.reading_score, s.literature_score, s.grammar_score, s.wrong_questions,
-                               m.name, m.group_name
-                        FROM scores s
-                        JOIN members m ON s.member_id = m.id
-                        ORDER BY s.id DESC LIMIT 50
-                    """, conn)
+                    q_roster = pd.read_sql_query(text("""
+                        SELECT m.id, m.name, m.group_name
+                        FROM class_members cm JOIN members m ON m.id = cm.member_id
+                        WHERE cm.class_id = :c AND (m.status = '재원' OR m.status IS NULL)
+                        ORDER BY m.name
+                    """), conn, params={"c": q_cid})
+                    q_prev = pd.read_sql_query(text("""
+                        SELECT member_id, score, feedback FROM scores
+                        WHERE exam_type = '수업 테스트' AND class_id = :c AND record_date = :d AND category = :n
+                    """), conn, params={"c": q_cid, "d": str(q_date), "n": q_name})
 
-                if scores_for_edit.empty:
-                    st.info("수정할 성적 데이터가 없습니다.")
+                if q_roster.empty:
+                    st.info("이 반에 배정된 학생이 없습니다. '반·시간표 관리 → ③ 학생 배정'에서 추가해 주세요.")
                 else:
-                    score_options = {
-                        f"[{row['record_date']}] {row['name']} - {row['category']} (총 {row['score']}점)": row['id']
-                        for _, row in scores_for_edit.iterrows()
-                    }
-                    selected_sc_label = st.selectbox("수정/삭제할 성적 선택", list(score_options.keys()))
-                    selected_sc_id = score_options[selected_sc_label]
-                    target_row = scores_for_edit[scores_for_edit['id'] == selected_sc_id].iloc[0]
-
-                    with st.form("score_edit_form"):
-                        ed_category = st.text_input("평가 회차명", value=target_row['category'])
-                        c_ed1, c_ed2, c_ed3 = st.columns(3)
-                        ed_read = c_ed1.number_input("독서 점수", min_value=0.0, max_value=100.0, value=float(target_row['reading_score'] or 0.0), step=0.5)
-                        ed_lit = c_ed2.number_input("문학 점수", min_value=0.0, max_value=100.0, value=float(target_row['literature_score'] or 0.0), step=0.5)
-                        ed_gram = c_ed3.number_input("문법/화법 점수", min_value=0.0, max_value=100.0, value=float(target_row['grammar_score'] or 0.0), step=0.5)
-
-                        ed_total = ed_read + ed_lit + ed_gram
-
-                        ed_wrong = st.text_input("오답 문항 메모", value=target_row['wrong_questions'] if target_row['wrong_questions'] else "")
-                        ed_feedback = st.text_area("피드백", value=target_row['feedback'] if target_row['feedback'] else "")
-
-                        # [수정 6] 삭제는 체크해야만 실행
-                        confirm_sc_del = st.checkbox("이 성적 기록을 삭제합니다 (되돌릴 수 없음)")
-
-                        btn_col1, btn_col2 = st.columns(2)
-                        save_sc_btn = btn_col1.form_submit_button("수정 저장")
-                        del_sc_btn = btn_col2.form_submit_button("기록 삭제", type="primary")
-
-                        if save_sc_btn:
+                    prev_sc = dict(zip(q_prev["member_id"], q_prev["score"]))
+                    prev_fb = dict(zip(q_prev["member_id"], q_prev["feedback"].fillna("")))
+                    q_df = pd.DataFrame({
+                        "학생ID": q_roster["id"],
+                        "이름": q_roster["name"],
+                        "소속": q_roster["group_name"].fillna(""),
+                        "맞은 개수": [prev_sc.get(i) for i in q_roster["id"]],
+                        "메모": [prev_fb.get(i, "") for i in q_roster["id"]],
+                    })
+                    q_df["맞은 개수"] = pd.to_numeric(q_df["맞은 개수"], errors="coerce")
+                    if not q_prev.empty:
+                        st.caption(f"✅ 이 반·날짜·테스트로 저장된 점수 {len(q_prev)}명을 불러왔어요. 고친 뒤 저장하면 덮어씁니다.")
+                    else:
+                        st.caption("맞은 개수만 적고 저장하세요. 빈칸으로 둔 학생(결석·미응시)은 저장되지 않아요.")
+                    q_edit = st.data_editor(
+                        q_df,
+                        column_config={
+                            "학생ID": None,
+                            "맞은 개수": st.column_config.NumberColumn("맞은 개수", min_value=0, max_value=int(q_total), step=1,
+                                                                    help=f"0 ~ {int(q_total)}"),
+                            "메모": st.column_config.TextColumn("메모", help="자주 틀린 개념, 재시험 여부 등"),
+                        },
+                        disabled=["이름", "소속"],
+                        hide_index=True,
+                        width="stretch",
+                        key=f"qz_editor_{q_cid}_{q_date}_{q_name}_{int(q_total)}",
+                    )
+                    filled = q_edit.dropna(subset=["맞은 개수"])
+                    if len(filled):
+                        avg_rate = (filled["맞은 개수"].astype(float) / q_total * 100).mean()
+                        st.caption(f"입력 {len(filled)}명 · 평균 정답률 {avg_rate:.0f}%")
+                    if st.button(f"💾 {q_cname} 테스트 점수 한 번에 저장", type="primary", key="qz_save"):
+                        if not q_name:
+                            st.warning("테스트 이름을 입력해 주세요. (예: 관동별곡 어휘 OX)")
+                        elif filled.empty:
+                            st.warning("맞은 개수를 한 명 이상 입력해 주세요.")
+                        elif (filled["맞은 개수"].astype(float) > q_total).any():
+                            st.warning(f"맞은 개수가 전체 문항 수({int(q_total)})보다 큰 학생이 있어요.")
+                        else:
                             with engine.begin() as conn:
                                 conn.execute(text("""
-                                    UPDATE scores
-                                    SET category = :cat, score = :sc, feedback = :fb,
-                                        reading_score = :r_sc, literature_score = :l_sc, grammar_score = :g_sc, wrong_questions = :wq
-                                    WHERE id = :id
-                                """), {
-                                    "cat": ed_category, "sc": ed_total, "fb": ed_feedback,
-                                    "r_sc": ed_read, "l_sc": ed_lit, "g_sc": ed_gram, "wq": ed_wrong, "id": selected_sc_id
-                                })
-                            st.success(f"국어 성적 수정이 완료되었습니다. (총점 {ed_total:.1f}점)")
+                                    DELETE FROM scores WHERE exam_type = '수업 테스트' AND class_id = :c
+                                      AND record_date = :d AND category = :n
+                                """), {"c": q_cid, "d": str(q_date), "n": q_name})
+                            for _, r in filled.iterrows():
+                                insert_score(dict(member_id=int(r["학생ID"]), record_date=str(q_date), category=q_name,
+                                                  score=float(r["맞은 개수"]), max_score=float(q_total),
+                                                  feedback=str(r["메모"] or "").strip(), exam_type="수업 테스트",
+                                                  class_id=q_cid, quiz_format=q_fmt))
+                            rate = (filled["맞은 개수"].astype(float) / q_total * 100).mean()
+                            ss.flash = f"✏️ {q_cname} '{q_name}' {len(filled)}명 저장 · 평균 정답률 {rate:.0f}%"
                             st.rerun()
 
-                        if del_sc_btn:
-                            if not confirm_sc_del:
-                                st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
-                            else:
-                                with engine.begin() as conn:
-                                    conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": selected_sc_id})
-                                st.success("선택한 성적 기록이 삭제되었습니다.")
-                                st.rerun()
+        else:  # 기타
+            with st.form("form_etc"):
+                c1, c2 = st.columns([2, 1])
+                c1.selectbox("학생 선택", list(member_dict.keys()), key="et_stu")
+                c2.date_input("시험 일자", today_kst(), key="et_date")
+                st.text_input("시험 이름 *", placeholder="사설 모의고사 3회 / 단원평가", key="et_cat")
+                st.text_input("범위 (선택)", key="et_scope")
+                s1, s2 = st.columns(2)
+                s1.number_input("점수 *", min_value=0.0, max_value=1000.0, step=0.5, key="et_score")
+                s2.number_input("만점", min_value=1.0, max_value=1000.0, value=100.0, step=1.0, key="et_max")
+                st.text_area("메모 / 피드백", key="et_fb", height=80)
+                st.form_submit_button("💾 성적 저장", type="primary", on_click=cb_etc)
 
+        if "sc_msg" in ss:
+            st.warning(ss.pop("sc_msg"))
+
+        # ---------- 저장된 성적 수정 · 삭제 ----------
         st.divider()
-        st.subheader("🕒 최근 등록된 국어 평가 (최신 10건)")
+        with st.expander("✏️/🗑️ 저장된 성적 수정·삭제", expanded=False):
+            with engine.connect() as conn:
+                sc_edit = pd.read_sql_query("""
+                    SELECT s.*, m.name AS m_name
+                    FROM scores s JOIN members m ON s.member_id = m.id
+                    ORDER BY s.record_date DESC, s.id DESC LIMIT 100
+                """, conn)
+            if sc_edit.empty:
+                st.info("저장된 성적이 없습니다.")
+            else:
+                sc_edit["exam_type"] = sc_edit["exam_type"].fillna("모의고사")
+                f1, f2 = st.columns([1, 2])
+                f_type = f1.selectbox("종류", ["전체"] + EXAM_TYPES, key="sc_edit_type")
+                f_kw = f2.text_input("학생 이름 / 시험 이름 검색", key="sc_edit_kw")
+                view = sc_edit if f_type == "전체" else sc_edit[sc_edit["exam_type"] == f_type]
+                if f_kw.strip():
+                    view = view[view["m_name"].str.contains(f_kw.strip(), na=False) |
+                                view["category"].str.contains(f_kw.strip(), na=False)]
+                if view.empty:
+                    st.caption("조건에 맞는 성적이 없습니다.")
+                else:
+                    opts = {f"[{r['record_date']}] {EXAM_ICONS.get(r['exam_type'], '')} {r['m_name']} · {r['category']} "
+                            f"({fmt_score(r['score'], r['max_score'])}) · #{r['id']}": int(r["id"]) for _, r in view.iterrows()}
+                    sel = st.selectbox("수정/삭제할 성적", list(opts.keys()), key="sc_edit_sel")
+                    sid = opts[sel]
+                    row = sc_edit[sc_edit["id"] == sid].iloc[0]
+                    rtype = row["exam_type"]
+
+                    def num(v, default=None):
+                        return default if v is None or pd.isna(v) else float(v)
+
+                    def txt(v):
+                        return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+
+                    with st.form(f"sc_edit_form_{sid}"):
+                        e1, e2 = st.columns([2, 1])
+                        ed_cat = e1.text_input("시험 이름", value=txt(row["category"]))
+                        try:
+                            cur_d = datetime.strptime(row["record_date"], "%Y-%m-%d").date()
+                        except (ValueError, TypeError):
+                            cur_d = today_kst()
+                        ed_date = e2.date_input("일자", cur_d)
+                        if rtype == "모의고사":
+                            a, b, c = st.columns(3)
+                            ed_r = a.number_input("독서", 0.0, 100.0, num(row["reading_score"], 0.0), 0.5)
+                            ed_l = b.number_input("문학", 0.0, 100.0, num(row["literature_score"], 0.0), 0.5)
+                            ed_g = c.number_input("문법·화법", 0.0, 100.0, num(row["grammar_score"], 0.0), 0.5)
+                            ed_score, ed_max = ed_r + ed_l + ed_g, 100.0
+                        else:
+                            a, b = st.columns(2)
+                            ed_score = a.number_input("점수" if rtype != "수업 테스트" else "맞은 개수", 0.0, 1000.0,
+                                                      num(row["score"], 0.0), 0.5)
+                            ed_max = b.number_input("만점" if rtype != "수업 테스트" else "전체 문항 수", 1.0, 1000.0,
+                                                    num(row["max_score"], 100.0), 1.0)
+                        g1, g2 = st.columns(2)
+                        ed_grade = g1.text_input("등급 / 성취도", value=txt(row["grade"]))
+                        ed_scope = g2.text_input("범위", value=txt(row["exam_scope"]))
+                        ed_wrong = st.text_input("틀린 문항", value=txt(row["wrong_questions"]))
+                        ed_fb = st.text_area("피드백 / 메모", value=txt(row["feedback"]), height=70)
+                        confirm_sc = st.checkbox("이 성적을 삭제합니다 (되돌릴 수 없음)")
+                        b1, b2 = st.columns(2)
+                        do_save = b1.form_submit_button("수정 저장", type="primary")
+                        do_del = b2.form_submit_button("삭제")
+                    if do_save:
+                        if ed_score > ed_max:
+                            st.warning("점수가 만점보다 커요.")
+                        else:
+                            params = {"cat": ed_cat.strip(), "d": str(ed_date), "sc": ed_score, "mx": ed_max,
+                                      "gr": ed_grade.strip(), "scope": ed_scope.strip(), "wq": ed_wrong.strip(),
+                                      "fb": ed_fb.strip(), "id": sid}
+                            extra = ""
+                            if rtype == "모의고사":
+                                extra = ", reading_score = :r, literature_score = :l, grammar_score = :g"
+                                params.update({"r": ed_r, "l": ed_l, "g": ed_g})
+                            with engine.begin() as conn:
+                                conn.execute(text(f"""
+                                    UPDATE scores SET category = :cat, record_date = :d, score = :sc, max_score = :mx,
+                                        grade = :gr, exam_scope = :scope, wrong_questions = :wq, feedback = :fb {extra}
+                                    WHERE id = :id
+                                """), params)
+                            ss.flash = f"✏️ {row['m_name']} · {ed_cat} 성적을 수정했어요."
+                            st.rerun()
+                    if do_del:
+                        if not confirm_sc:
+                            st.warning("삭제하려면 확인 칸을 먼저 체크해 주세요.")
+                        else:
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": sid})
+                            ss.pop("sc_edit_sel", None)
+                            ss.flash = "🗑️ 성적을 삭제했어요."
+                            st.rerun()
+
+        st.subheader("🕒 최근 입력한 성적")
         with engine.connect() as conn:
             recent_sc = pd.read_sql_query("""
-                SELECT s.record_date AS 일자, m.name AS 이름, s.category AS 평가명,
-                       s.score AS 총점, s.reading_score AS 독서, s.literature_score AS 문학,
-                       s.grammar_score AS 문법_화법, s.wrong_questions AS 주요오답, s.feedback AS 피드백
-                FROM scores s
-                JOIN members m ON s.member_id = m.id
-                ORDER BY s.id DESC LIMIT 10
+                SELECT COALESCE(s.exam_type, '모의고사') AS 종류, s.record_date AS 일자, m.name AS 이름,
+                       s.category AS 시험, s.score, s.max_score, COALESCE(s.grade, '') AS 등급,
+                       COALESCE(NULLIF(s.exam_scope, ''), s.quiz_format, '') AS "범위·유형",
+                       COALESCE(s.wrong_questions, '') AS 오답
+                FROM scores s JOIN members m ON s.member_id = m.id
+                ORDER BY s.id DESC LIMIT 15
             """, conn)
-        st.dataframe(recent_sc, width="stretch")
+        if recent_sc.empty:
+            st.caption("아직 입력한 성적이 없습니다.")
+        else:
+            recent_sc.insert(4, "점수", [fmt_score(a, b) for a, b in zip(recent_sc["score"], recent_sc["max_score"])])
+            st.dataframe(recent_sc.drop(columns=["score", "max_score"]).fillna(""), hide_index=True, width="stretch")
 
 # 4. 상담/소통 일지
 elif menu == MENU_LOG:
@@ -1166,30 +1468,64 @@ elif menu == MENU_PORTFOLIO:
                 with col_att:
                     st.subheader("📅 최근 출결 현황")
                     df_att = pd.read_sql_query(text("SELECT event_date AS 일자, status AS 상태 FROM attendance WHERE member_id = :id ORDER BY event_date DESC"), conn, params={"id": selected_id})
-                    st.dataframe(df_att, width="stretch")
+                    st.dataframe(df_att, hide_index=True, width="stretch")
 
-                with col_score:
-                    st.subheader("📈 국어 총점 추이 그래프")
-                    df_sc_chart = pd.read_sql_query(text(
-                        "SELECT record_date, category, score FROM scores WHERE member_id = :id ORDER BY record_date ASC, id ASC"
-                    ), conn, params={"id": selected_id})
-
-                    if not df_sc_chart.empty:
-                        df_sc_chart['회차'] = df_sc_chart['record_date'] + " (" + df_sc_chart['category'] + ")"
-                        chart_data = df_sc_chart.set_index('회차')[['score']].rename(columns={'score': '국어 총점'})
-                        st.line_chart(chart_data)
-                    else:
-                        st.info("등록된 성적 데이터가 없습니다.")
-
-                st.subheader("📊 통합 국어 영역별 세부 성적 및 오답 기록")
-                df_sc_detail = pd.read_sql_query(text("""
-                    SELECT record_date AS 일자, category AS 평가명, score AS 총점,
-                           reading_score AS 독서, literature_score AS 문학,
-                           grammar_score AS 문법_화법,
-                           wrong_questions AS 주요오답, feedback AS 피드백
-                    FROM scores WHERE member_id = :id ORDER BY record_date DESC
+                # [수정 21] 시험 종류별로 그래프를 나눠서
+                df_sc_all = pd.read_sql_query(text("""
+                    SELECT record_date, COALESCE(exam_type, '모의고사') AS exam_type, category, score, max_score,
+                           grade, exam_scope, quiz_format, reading_score, literature_score, grammar_score,
+                           wrong_questions, feedback, school_avg
+                    FROM scores WHERE member_id = :id ORDER BY record_date ASC, id ASC
                 """), conn, params={"id": selected_id})
-                st.dataframe(df_sc_detail, width="stretch")
+                with col_score:
+                    st.subheader("📈 성적 추이")
+                    if df_sc_all.empty:
+                        st.info("등록된 성적 데이터가 없습니다.")
+                    else:
+                        present = [t for t in EXAM_TYPES if t in set(df_sc_all["exam_type"])]
+                        for t, tab in zip(present, st.tabs([f"{EXAM_ICONS[t]} {t}" for t in present])):
+                            with tab:
+                                d = df_sc_all[df_sc_all["exam_type"] == t].copy()
+                                d["회차"] = d["record_date"] + " " + d["category"].fillna("")
+                                d["mx"] = d["max_score"].fillna(100).astype(float)
+                                if t == "모의고사":
+                                    d["총점"] = d["score"].astype(float)
+                                    trend_chart(d, ["총점"], "총점", 100)
+                                elif t == "수업 테스트":
+                                    d["정답률(%)"] = (d["score"].astype(float) / d["mx"] * 100).round(0)
+                                    trend_chart(d, ["정답률(%)"], "정답률(%)", 100)
+                                    st.caption(f"수업 테스트 {len(d)}회 · 평균 정답률 {d['정답률(%)'].mean():.0f}%")
+                                else:
+                                    d["내 점수"] = (d["score"].astype(float) / d["mx"] * 100).round(1)
+                                    cols_plot = ["내 점수"]
+                                    if t == "학교 내신" and d["school_avg"].notna().any():
+                                        d["학교 평균"] = (d["school_avg"].astype(float) / d["mx"] * 100).round(1)
+                                        cols_plot.append("학교 평균")
+                                    trend_chart(d, cols_plot, "점수(100점 환산)", 100)
+                                if len(d) == 1:
+                                    st.caption("기록이 2개 이상 쌓이면 추이가 선으로 이어져요.")
+
+                st.subheader("📊 성적 상세 기록")
+                if not df_sc_all.empty:
+                    det = df_sc_all.sort_values("record_date", ascending=False).copy()
+                    det_view = pd.DataFrame({
+                        "종류": det["exam_type"],
+                        "일자": det["record_date"],
+                        "시험": det["category"],
+                        "점수": [fmt_score(a, b) for a, b in zip(det["score"], det["max_score"])],
+                        "등급": det["grade"],
+                        "범위·유형": det["exam_scope"].where(det["exam_scope"].fillna("") != "", det["quiz_format"]),
+                        "독서": det["reading_score"],
+                        "문학": det["literature_score"],
+                        "문법·화법": det["grammar_score"],
+                        "틀린 문항": det["wrong_questions"],
+                        "피드백": det["feedback"],
+                    })
+                    for col in ["독서", "문학", "문법·화법"]:
+                        det_view[col] = [("" if v is None or pd.isna(v) else f"{float(v):g}") for v in det_view[col]]
+                    st.dataframe(det_view.fillna("").astype(str), hide_index=True, width="stretch")
+                else:
+                    st.caption("등록된 성적이 없습니다.")
 
                 st.divider()
                 st.subheader("💬 상담 및 학습 면담 이력")
@@ -1480,7 +1816,10 @@ elif menu == MENU_BACKUP:
 
         df_exp_scores = pd.read_sql_query("""
             SELECT s.id AS 평가ID, s.record_date AS 시험일자, m.name AS 학생이름, m.group_name AS 소속_학교,
-                   s.category AS 평가회차명, s.score AS 국어총점,
+                   COALESCE(s.exam_type, '모의고사') AS 시험종류, s.category AS 시험이름,
+                   s.score AS 점수, s.max_score AS 만점, s.grade AS 등급_성취도, s.percentile AS 백분위,
+                   s.exam_scope AS 시험범위, s.quiz_format AS 테스트유형,
+                   s.objective_score AS 객관식, s.essay_score AS 서술형, s.school_avg AS 학교평균,
                    s.reading_score AS 독서점수, s.literature_score AS 문학점수, s.grammar_score AS 문법_화법점수,
                    s.wrong_questions AS 주요오답문항, s.feedback AS 피드백
             FROM scores s
