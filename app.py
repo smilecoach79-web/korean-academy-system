@@ -360,7 +360,8 @@ MENU_SCORE = "📝  성적 및 국어 평가"
 MENU_LOG = "💬  상담/소통 일지"
 MENU_PORTFOLIO = "👤  개인별 종합 조회"
 MENU_TIMETABLE = "🗓️  내 시간표"
-MENU_CLASS = "🏫  반·시간표 관리"
+MENU_CLASS = "⚙️  반·시간표 관리"
+MENU_CLASSVIEW = "🏫  반별 종합 조회"
 MENU_BACKUP = "💾  데이터 백업"
 
 # ----------------- 사이드바 꾸미기 -----------------
@@ -447,7 +448,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     st.divider()
     menu = st.radio("메뉴 선택", [
-        MENU_TODAY, MENU_TIMETABLE, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO,
+        MENU_TODAY, MENU_TIMETABLE, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO, MENU_CLASSVIEW,
         MENU_MEMBERS, MENU_CLASS, MENU_BACKUP
     ], label_visibility="collapsed", key="menu")
     st.divider()
@@ -468,6 +469,37 @@ def go_class_attendance(class_name):
 
 
 # [수정 23] 어디서든 학생을 누르면 그 학생의 개인별 종합 조회로 이동
+def go_class(class_id):
+    """[수정 28] 반 페이지(반별 종합 조회)로 이동"""
+    st.session_state["menu"] = MENU_CLASSVIEW
+    st.session_state["cv_target_id"] = int(class_id)
+
+
+def go_class_quiz(class_name):
+    st.session_state["menu"] = MENU_SCORE
+    st.session_state["exam_type_sel"] = "수업 테스트"
+    st.session_state["qz_class"] = class_name
+
+
+def go_class_event(class_name):
+    st.session_state["menu"] = MENU_TIMETABLE
+    st.session_state["ev_cls"] = class_name
+    st.session_state["ev_open"] = True
+
+
+def go_log_for(label):
+    """[수정 28] 학생이 미리 선택된 상담 입력 화면으로"""
+    st.session_state["menu"] = MENU_LOG
+    st.session_state["log_add_target"] = label
+
+
+def go_score_for(label):
+    """[수정 28] 학생이 미리 선택된 성적 입력 화면으로"""
+    st.session_state["menu"] = MENU_SCORE
+    for k in ["mk_stu", "ns_stu", "et_stu"]:
+        st.session_state[k] = label
+
+
 def go_student(member_id):
     st.session_state["menu"] = MENU_PORTFOLIO
     st.session_state["pf_target_id"] = int(member_id)
@@ -611,6 +643,8 @@ if menu == MENU_TODAY:
                         a.caption(f"과제 검사: {hs}" if hs else "과제 검사: 아직 안 함")
                     b.button("출결·수업 기록 →", key=f"go_att_{r.id}_{r.start_time}",
                              on_click=go_class_attendance, args=(r.name,), width="stretch")
+                    b.button("🏫 반 보기", key=f"go_cls_{r.id}_{r.start_time}",
+                             on_click=go_class, args=(r.id,), width="stretch")
                     # [수정 23] 오늘 수업 기록을 그 자리에서 펼쳐 보기
                     if logged_today:
                         lt = my_ls[my_ls["lesson_date"] == t_str].iloc[0]
@@ -1660,6 +1694,10 @@ elif menu == MENU_PORTFOLIO:
     if members.empty:
         st.warning("등록된 학생이 없습니다.")
     else:
+        # [수정 29] 사이드바로 다시 들어오면 마지막으로 보던 학생을 그대로 보여 줌
+        if "pf_target_id" not in st.session_state and "pf_student_select" not in st.session_state \
+                and "pf_last_id" in st.session_state:
+            st.session_state["pf_target_id"] = st.session_state["pf_last_id"]
         # [수정 23] 다른 화면에서 학생을 눌러 넘어왔으면, 필터를 풀고 그 학생을 선택
         if "pf_target_id" in st.session_state:
             tid = st.session_state.pop("pf_target_id")
@@ -1690,6 +1728,7 @@ elif menu == MENU_PORTFOLIO:
             }
             selected_label = st.selectbox("조회할 학생 선택", list(member_dict.keys()), key="pf_student_select")
             selected_id = member_dict[selected_label]
+            st.session_state["pf_last_id"] = int(selected_id)
 
             with engine.connect() as conn:
                 m_info = pd.read_sql_query(text("SELECT * FROM members WHERE id = :id"), conn, params={"id": selected_id}).iloc[0]
@@ -1704,6 +1743,14 @@ elif menu == MENU_PORTFOLIO:
                     WHERE cm.member_id = :id ORDER BY s.weekday, s.start_time
                 """), conn, params={"id": selected_id})
                 st.write(f"📞 연락처: {sv(m_info['contact'], '-')} | 📝 학습 메모: {sv(m_info['notes'], '-')}")
+                # [수정 28] 이 학생으로 바로 할 일 (학생이 미리 선택된 입력 화면으로)
+                if sv(m_info["status"], "재원") != "퇴원":
+                    stu_label = f"[{sv(m_info['group_name'], '소속 없음')}] {m_info['name']} (ID:{m_info['id']})"
+                    q1, q2, _q = st.columns([1, 1, 2])
+                    q1.button("✏️ 상담 기록하기", key="pf_go_log", on_click=go_log_for, args=(stu_label,), width="stretch")
+                    q2.button("📝 성적 입력하기", key="pf_go_score", on_click=go_score_for, args=(stu_label,), width="stretch")
+                else:
+                    st.caption("퇴원한 학생이에요. 다시 수업을 들으면 '구성원 등록/목록'에서 재원으로 복원해 주세요.")
                 if my_classes.empty:
                     st.write("🏫 수강 반: 배정된 반 없음")
                 else:
@@ -1721,6 +1768,8 @@ elif menu == MENU_PORTFOLIO:
                     for j, r in enumerate(my_classes.itertuples()):
                         cm_ = mates[mates["class_id"] == r.id]
                         with pop_cols[j].popover(f"👥 {r.name} ({len(cm_) + 1}명)", width="stretch"):
+                            st.button(f"🏫 {r.name} 반 페이지 →", key=f"pf_cls_{r.id}", on_click=go_class,
+                                      args=(r.id,), type="primary", width="stretch")
                             if cm_.empty:
                                 st.caption("같은 반 다른 학생이 없어요.")
                             for mm in cm_.itertuples():
@@ -1838,7 +1887,7 @@ elif menu == MENU_TIMETABLE:
         return int(h) * 60 + int(m)
 
     # ---------- [수정 27] 보강·휴강 잡기 ----------
-    with st.expander("🔁 보강 · 휴강 일정 잡기 / 관리", expanded=False):
+    with st.expander("🔁 보강 · 휴강 일정 잡기 / 관리", expanded=bool(st.session_state.pop("ev_open", False))):
         if tt_cls.empty:
             st.caption("먼저 '반·시간표 관리'에서 반을 만들어 주세요.")
         else:
@@ -1937,6 +1986,13 @@ elif menu == MENU_TIMETABLE:
                         st.rerun()
 
     # ---------- 주간 시간표 (실제 날짜 기준) ----------
+    # [수정 28] 반 페이지 바로가기
+    if not tt_cls.empty:
+        st.caption("🏫 반 페이지 바로가기")
+        jump_cols = st.columns(min(len(tt_cls), 5))
+        for k, c_ in enumerate(tt_cls.itertuples()):
+            jump_cols[k % len(jump_cols)].button(c_.name, key=f"tt_jump_{c_.id}", on_click=go_class,
+                                                  args=(c_.id,), width="stretch")
     wk = st.radio("보기", ["이번 주", "다음 주"], horizontal=True, key="tt_week", label_visibility="collapsed")
     monday = t0 - timedelta(days=t0.weekday()) + timedelta(days=7 if wk == "다음 주" else 0)
     sunday = monday + timedelta(days=6)
@@ -2060,7 +2116,10 @@ elif menu == MENU_CLASS:
                     WHERE cm.class_id = :c AND (m.status = '재원' OR m.status IS NULL) ORDER BY m.name
                 """), conn, params={"c": int(crow["id"])})
             with st.container(border=True):
-                st.markdown(f"**👥 {crow['name']}** 학생 {len(c_students)}명 · 이름을 누르면 종합 조회로 이동해요")
+                hc1, hc2 = st.columns([3, 1])
+                hc1.markdown(f"**👥 {crow['name']}** 학생 {len(c_students)}명 · 이름을 누르면 종합 조회로 이동해요")
+                hc2.button("🏫 반 페이지 →", key=f"cls_page_{crow['id']}", on_click=go_class,
+                           args=(int(crow["id"]),), type="primary", width="stretch")
                 if c_students.empty:
                     st.caption("배정된 학생이 없어요. 아래 ③ 학생 배정에서 추가해 주세요.")
                 else:
@@ -2216,6 +2275,151 @@ elif menu == MENU_CLASS:
                     added, removed = set(picked) - set(cur_ids), set(cur_ids) - set(picked)
                     st.session_state["flash"] = f"✅ {as_name} 학생 배정 저장 · 총 {len(picked)}명 (추가 {len(added)}명, 제외 {len(removed)}명)"
                     st.rerun()
+
+# 9. 반별 종합 조회 [수정 28] — 학생 페이지의 짝: 반 하나에 관한 모든 것을 한 화면에
+elif menu == MENU_CLASSVIEW:
+    st.header("🏫 반별 종합 조회")
+    ss = st.session_state
+    t0 = today_kst()
+    with engine.connect() as conn:
+        cv_all = pd.read_sql_query("SELECT id, name, grade, notes, active FROM classes ORDER BY active DESC, name", conn)
+
+    if cv_all.empty:
+        st.info("아직 만든 반이 없습니다. '반·시간표 관리'에서 반을 만들어 주세요.")
+    else:
+        cv_label = {int(r["id"]): r["name"] + ("" if r["active"] else " · 운영 종료") for _, r in cv_all.iterrows()}
+        # 다른 화면에서 반을 눌러 넘어왔으면 그 반을 선택
+        if "cv_target_id" in ss:
+            tid = ss.pop("cv_target_id")
+            if tid in cv_label:
+                ss["cv_class"] = tid
+        if ss.get("cv_class") not in cv_label:
+            # [수정 29] 사이드바로 다시 들어오면 마지막으로 보던 반을 그대로
+            ss["cv_class"] = ss["cv_last_id"] if ss.get("cv_last_id") in cv_label else list(cv_label.keys())[0]
+        cv_id = st.selectbox("조회할 반", list(cv_label.keys()), format_func=lambda i: cv_label[i], key="cv_class")
+        ss["cv_last_id"] = int(cv_id)
+        crow = cv_all[cv_all["id"] == cv_id].iloc[0]
+        cv_name = crow["name"]
+
+        with engine.connect() as conn:
+            cv_sched = pd.read_sql_query(text(
+                "SELECT weekday, start_time, end_time FROM class_schedules WHERE class_id = :c ORDER BY weekday, start_time"
+            ), conn, params={"c": cv_id})
+            cv_stu = pd.read_sql_query(text("""
+                SELECT m.id, m.name, m.group_name FROM class_members cm JOIN members m ON m.id = cm.member_id
+                WHERE cm.class_id = :c AND (m.status = '재원' OR m.status IS NULL) ORDER BY m.name
+            """), conn, params={"c": cv_id})
+            cv_att = pd.read_sql_query(text("""
+                SELECT member_id, event_date, status, COALESCE(homework_status, '') AS hw
+                FROM attendance WHERE class_id = :c
+            """), conn, params={"c": cv_id})
+            cv_quiz = pd.read_sql_query(text("""
+                SELECT member_id, record_date, category, score, max_score, quiz_format
+                FROM scores WHERE exam_type = '수업 테스트' AND class_id = :c
+            """), conn, params={"c": cv_id})
+            cv_ls = pd.read_sql_query(text("""
+                SELECT lesson_date, content, homework, due_date, notes FROM lessons
+                WHERE class_id = :c ORDER BY lesson_date DESC LIMIT 12
+            """), conn, params={"c": cv_id})
+            cv_ev = pd.read_sql_query(text("""
+                SELECT event_date, kind, start_time, end_time, memo FROM class_events
+                WHERE class_id = :c AND event_date >= :t ORDER BY event_date
+            """), conn, params={"c": cv_id, "t": str(t0)})
+
+        # ---- 머리말 ----
+        st.markdown(f"### 🏫 {cv_name}" + (f"  ·  {sv(crow['grade'])}" if sv(crow["grade"]) else "")
+                    + ("" if crow["active"] else "  ·  운영 종료"))
+        st.write(md(f"🕒 수업 시간: {schedule_text(cv_sched) or '미등록'}"
+                    + (f"  |  📝 {sv(crow['notes'])}" if sv(crow["notes"]) else "")))
+        if not cv_ev.empty:
+            st.info(md("📌 다가오는 일정: " + " / ".join(
+                ("🔁 보강 " if e.kind == "보강" else "🚫 휴강 ")
+                + f"{datetime.strptime(e.event_date, '%Y-%m-%d').month}/{datetime.strptime(e.event_date, '%Y-%m-%d').day}"
+                + f"({WEEKDAYS[datetime.strptime(e.event_date, '%Y-%m-%d').weekday()]})"
+                + (f" {sv(e.start_time)}" if sv(e.start_time) else "")
+                + (f" {sv(e.memo)}" if sv(e.memo) else "")
+                for e in cv_ev.itertuples())))
+
+        # ---- 이 반에서 바로 할 일 ----
+        a1, a2, a3 = st.columns(3)
+        a1.button("📅 출결·수업 기록 →", key="cv_go_att", on_click=go_class_attendance, args=(cv_name,), width="stretch")
+        a2.button("✏️ 수업 테스트 입력 →", key="cv_go_quiz", on_click=go_class_quiz, args=(cv_name,), width="stretch")
+        a3.button("🔁 보강·휴강 잡기 →", key="cv_go_ev", on_click=go_class_event, args=(cv_name,), width="stretch")
+
+        # ---- 한눈에 보는 숫자 ----
+        stu_ids = set(cv_stu["id"])
+        att_now = cv_att[cv_att["member_id"].isin(stu_ids)]
+        hw_rows = att_now[att_now["hw"].isin(HW_OPTIONS[1:])]
+        qz_now = cv_quiz[cv_quiz["member_id"].isin(stu_ids)].copy()
+        if not qz_now.empty:
+            qz_now["rate"] = qz_now["score"].astype(float) / qz_now["max_score"].fillna(100).astype(float) * 100
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("학생", f"{len(cv_stu)}명")
+        k2.metric("출석률", f"{att_now['status'].isin(['출석', '보강완료']).mean() * 100:.0f}%" if len(att_now) else "-",
+                  help="이 반 수업에서의 출석·보강완료 비율")
+        k3.metric("과제 완료율", f"{(hw_rows['hw'] == '완료').mean() * 100:.0f}%" if len(hw_rows) else "-",
+                  help=hw_summary(hw_rows.rename(columns={"hw": "과제"})) or "아직 과제 검사 기록이 없어요")
+        k4.metric("수업 테스트 평균", f"{qz_now['rate'].mean():.0f}%" if len(qz_now) else "-",
+                  help=f"{qz_now.groupby(['record_date', 'category']).ngroups}회 실시" if len(qz_now) else "아직 테스트 기록이 없어요")
+
+        st.divider()
+        left, right = st.columns([1.15, 1])
+
+        # ---- 학생별 현황 (누르면 학생 페이지로) ----
+        with left:
+            st.subheader("👥 학생별 현황")
+            if cv_stu.empty:
+                st.caption("배정된 학생이 없어요. '반·시간표 관리 → ③ 학생 배정'에서 추가해 주세요.")
+            else:
+                rows = []
+                for s_ in cv_stu.itertuples():
+                    a_ = att_now[att_now["member_id"] == s_.id]
+                    h_ = a_[a_["hw"].isin(HW_OPTIONS[1:])]
+                    q_ = qz_now[qz_now["member_id"] == s_.id] if len(qz_now) else qz_now
+                    absent = int((a_["status"] == "결석").sum())
+                    rows.append({
+                        "이름": s_.name,
+                        "소속": sv(s_.group_name),
+                        "출석률": f"{a_['status'].isin(['출석', '보강완료']).mean() * 100:.0f}%" if len(a_) else "-",
+                        "결석": f"{absent}회" if len(a_) else "-",
+                        "과제 완료": f"{(h_['hw'] == '완료').mean() * 100:.0f}%" if len(h_) else "-",
+                        "테스트 평균": f"{q_['rate'].mean():.0f}%" if len(q_) else "-",
+                    })
+                student_table(pd.DataFrame(rows), cv_stu["id"].tolist(), cv_stu["name"].tolist(), "cv_stu_tbl",
+                              hint="👆 맨 왼쪽 네모 칸을 누르면 그 학생의 종합 조회로 갈 수 있어요.")
+
+            st.subheader("✏️ 수업 테스트 결과")
+            if qz_now.empty:
+                st.caption("아직 이 반의 수업 테스트 기록이 없어요.")
+            else:
+                qs = (qz_now.groupby(["record_date", "category"])
+                      .agg(응시=("member_id", "count"), 평균=("rate", "mean"), 최고=("rate", "max"), 최저=("rate", "min"))
+                      .reset_index().sort_values("record_date", ascending=False))
+                qs_view = pd.DataFrame({
+                    "날짜": [d[5:].replace("-", "/") for d in qs["record_date"]],
+                    "테스트": qs["category"],
+                    "응시": [f"{n}명" for n in qs["응시"]],
+                    "평균 정답률": [f"{v:.0f}%" for v in qs["평균"]],
+                    "최고·최저": [f"{a:.0f}% · {b:.0f}%" for a, b in zip(qs["최고"], qs["최저"])],
+                })
+                st.dataframe(qs_view, hide_index=True, width="stretch")
+
+        # ---- 수업 진도 ----
+        with right:
+            st.subheader("📖 최근 수업 진도")
+            if cv_ls.empty:
+                st.caption("아직 수업 기록이 없어요. '출결·수업 기록'에서 수업 내용과 과제를 적으면 여기에 쌓여요.")
+            else:
+                for l_ in cv_ls.itertuples():
+                    ld = datetime.strptime(l_.lesson_date, "%Y-%m-%d").date()
+                    with st.container(border=True):
+                        st.markdown(f"**{ld.month}/{ld.day}({WEEKDAYS[ld.weekday()]})**　{md(sv(l_.content, '(수업 내용 없음)'))}")
+                        if sv(l_.homework):
+                            due = f" · 제출 {sv(l_.due_date)[5:].replace('-', '/')}" if sv(l_.due_date) else ""
+                            st.caption(md(f"📝 과제: {sv(l_.homework)}{due}"))
+                        if sv(l_.notes):
+                            st.caption(md(f"메모: {sv(l_.notes)}"))
+
 
 # 6. 데이터 백업 (CSV/엑셀 다운로드)
 elif menu == MENU_BACKUP:
