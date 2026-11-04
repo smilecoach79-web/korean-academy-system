@@ -183,6 +183,19 @@ def trend_chart(d, ycols, y_title, y_max=None):
     st.altair_chart(chart.properties(height=260), width="stretch")
 
 
+def sv(v, default=""):
+    """[수정 24] 데이터베이스의 빈 칸(None, nan)을 안전하게 글자로 바꾸기"""
+    if v is None:
+        return default
+    try:
+        if pd.isna(v):
+            return default
+    except (TypeError, ValueError):
+        pass
+    v = str(v)
+    return v if v.strip() else default
+
+
 def fmt_score(score, max_score):
     """84 / 100 처럼 점수 표시"""
     if score is None or pd.isna(score):
@@ -511,14 +524,14 @@ if menu == MENU_TODAY:
                         with a.popover("📖 오늘 수업 기록 ✅ 보기"):
                             st.markdown(f"**{r.name}** · {t.strftime('%m/%d')} {r.start_time}~{r.end_time}")
                             st.markdown("**수업 내용**")
-                            st.write(md(lt["content"] or "-"))
+                            st.write(md(sv(lt["content"], "-")))
                             st.markdown("**과제**")
-                            hw_txt = lt["homework"] or "-"
-                            if lt["homework"] and lt["due_date"]:
+                            hw_txt = sv(lt["homework"], "-")
+                            if sv(lt["homework"]) and sv(lt["due_date"]):
                                 hw_txt += f"  \n(제출: {lt['due_date'][5:].replace('-', '/')})"
                             st.write(md(hw_txt))
-                            if lt["notes"]:
-                                st.caption(md(f"메모: {lt['notes']}"))
+                            if sv(lt["notes"]):
+                                st.caption(md(f"메모: {sv(lt['notes'])}"))
                             my_att = att_today[att_today["class_id"] == r.id] if not att_today.empty else att_today
                             if not my_att.empty:
                                 st.markdown("**오늘 출결**")
@@ -551,9 +564,9 @@ if menu == MENU_TODAY:
             if ev_lg.selection.rows:
                 rl = recent_logs.iloc[ev_lg.selection.rows[0]]
                 with st.container(border=True):
-                    st.markdown(f"**{rl['일자']} · {rl['이름']}** ({rl['소속'] or '소속 없음'})")
+                    st.markdown(f"**{rl['일자']} · {rl['이름']}** ({sv(rl['소속'], '소속 없음')})")
                     st.markdown(f"**주제:** {rl['주제']}")
-                    st.write(md(rl["details"] or "(상세 내용 없음)"))
+                    st.write(md(sv(rl["details"], "(상세 내용 없음)")))
                     student_button(rl["member_id"], rl["이름"], "go_stu_log")
 
         st.subheader("📝 최근 시험 결과")
@@ -604,7 +617,7 @@ elif menu == MENU_MEMBERS:
             dup = pd.read_sql_query(text("SELECT id, name, group_name, status FROM members WHERE name = :n ORDER BY id"),
                                     conn, params={"n": nm})
         if not dup.empty and not st.session_state.get("new_dup_ok", False):
-            who = ", ".join(f"{r['name']}({r['group_name'] or '소속 없음'}, {r['status'] or '재원'}) · ID {r['id']}"
+            who = ", ".join(f"{r['name']}({sv(r['group_name'], '소속 없음')}, {sv(r['status'], '재원')}) · ID {r['id']}"
                             for _, r in dup.iterrows())
             st.session_state["add_msg"] = ("warning",
                 f"이미 같은 이름이 등록되어 있어요 → {who}\n\n"
@@ -643,7 +656,7 @@ elif menu == MENU_MEMBERS:
             if m_list_edit.empty:
                 st.info("등록된 학생이 없습니다.")
             else:
-                edit_options = {f"{row['name']} ({row['group_name']}) · ID {row['id']}": row['id'] for _, row in m_list_edit.iterrows()}
+                edit_options = {f"{row['name']} ({sv(row['group_name'], '소속 없음')}) · ID {row['id']}": row['id'] for _, row in m_list_edit.iterrows()}
                 target_edit_label = st.selectbox("수정할 대상 선택", list(edit_options.keys()), key="edit_selector")
                 target_edit_id = edit_options[target_edit_label]
 
@@ -652,9 +665,9 @@ elif menu == MENU_MEMBERS:
 
                 with st.form("edit_member_form"):
                     edit_name = st.text_input("학생 이름 *", value=curr_info['name'])
-                    edit_group = st.text_input("소속 / 반", value=curr_info['group_name'] if curr_info['group_name'] else "")
-                    edit_contact = st.text_input("연락처", value=curr_info['contact'] if curr_info['contact'] else "")
-                    edit_notes = st.text_input("기본 메모", value=curr_info['notes'] if curr_info['notes'] else "")
+                    edit_group = st.text_input("소속 / 반", value=sv(curr_info['group_name']))
+                    edit_contact = st.text_input("연락처", value=sv(curr_info['contact']))
+                    edit_notes = st.text_input("기본 메모", value=sv(curr_info['notes']))
                     submit_edit = st.form_submit_button("수정사항 저장")
 
                     if submit_edit and edit_name:
@@ -677,7 +690,7 @@ elif menu == MENU_MEMBERS:
             else:
                 # 동명이인 구분을 위해 ID를 함께 표시
                 del_options = {
-                    f"[{row['status'] or '재원'}] {row['name']} ({row['group_name']}) · ID {row['id']}": row['id']
+                    f"[{sv(row['status'], '재원')}] {row['name']} ({sv(row['group_name'], '소속 없음')}) · ID {row['id']}": row['id']
                     for _, row in m_list.iterrows()
                 }
                 target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
@@ -884,7 +897,7 @@ elif menu == MENU_ATT:
             if has_ls:
                 st.caption("✅ 이 날짜에 저장된 수업 기록을 불러왔어요. 고친 뒤 저장하면 덮어씁니다.")
             due_default = None
-            if has_ls and c_val["due_date"]:
+            if has_ls and sv(c_val["due_date"]):
                 try:
                     due_default = datetime.strptime(c_val["due_date"], "%Y-%m-%d").date()
                 except ValueError:
@@ -893,14 +906,14 @@ elif menu == MENU_ATT:
                 due_default = next_class
 
             with st.form(f"lesson_form_{cid}_{bdate}"):
-                l_content = st.text_area("수업 내용", value=(c_val["content"] or "") if has_ls else "",
+                l_content = st.text_area("수업 내용", value=sv(c_val["content"]) if has_ls else "",
                                          placeholder="고전시가 – 관동별곡(정철) 서사·본사1 해석, 화자의 여정과 정서 변화", height=90)
-                l_hw = st.text_area("과제", value=(c_val["homework"] or "") if has_ls else "",
+                l_hw = st.text_area("과제", value=sv(c_val["homework"]) if has_ls else "",
                                     placeholder="관동별곡 기출 문제 풀어오기 (교재 p.45~52)", height=70)
                 f1, f2 = st.columns([1, 2])
                 l_due = f1.date_input("과제 제출일", value=due_default,
                                       help="기본값은 이 반의 다음 수업 날짜예요. 과제가 없으면 비워 두세요.")
-                l_notes = f2.text_input("메모 (선택)", value=(c_val["notes"] or "") if has_ls else "",
+                l_notes = f2.text_input("메모 (선택)", value=sv(c_val["notes"]) if has_ls else "",
                                         placeholder="진도 덜 나감, 다음 시간 본사2부터")
                 g1, g2 = st.columns([1, 1])
                 save_ls = g1.form_submit_button("📖 수업 기록 저장", type="primary", width="stretch")
@@ -941,7 +954,7 @@ elif menu == MENU_ATT:
 
         st.divider()
         col_att_add, col_att_edit = st.columns([1.2, 1])
-        member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": row['id'] for _, row in members.iterrows()}
+        member_dict = {f"[{sv(row['group_name'], '소속 없음')}] {row['name']} (ID:{row['id']})": row['id'] for _, row in members.iterrows()}
 
         with col_att_add:
             with st.expander("➕ 학생 한 명씩 입력 (보강·개별 수업)", expanded=False):
@@ -1036,7 +1049,7 @@ elif menu == MENU_SCORE:
     if members.empty:
         st.warning("먼저 학생을 등록해 주세요.")
     else:
-        member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": int(row['id']) for _, row in members.iterrows()}
+        member_dict = {f"[{sv(row['group_name'], '소속 없음')}] {row['name']} (ID:{row['id']})": int(row['id']) for _, row in members.iterrows()}
         ss = st.session_state
 
         exam_type = st.radio("시험 종류", EXAM_TYPES, horizontal=True, key="exam_type_sel",
@@ -1269,7 +1282,7 @@ elif menu == MENU_SCORE:
                             for _, r in filled.iterrows():
                                 insert_score(dict(member_id=int(r["학생ID"]), record_date=str(q_date), category=q_name,
                                                   score=float(r["맞은 개수"]), max_score=float(q_total),
-                                                  feedback=str(r["메모"] or "").strip(), exam_type="수업 테스트",
+                                                  feedback=sv(r["메모"]).strip(), exam_type="수업 테스트",
                                                   class_id=q_cid, quiz_format=q_fmt))
                             rate = (filled["맞은 개수"].astype(float) / q_total * 100).mean()
                             ss.flash = f"✏️ {q_cname} '{q_name}' {len(filled)}명 저장 · 평균 정답률 {rate:.0f}%"
@@ -1412,7 +1425,7 @@ elif menu == MENU_LOG:
         st.warning("먼저 학생을 등록해 주세요.")
     else:
         col_lg_add, col_lg_edit = st.columns([1.2, 1])
-        member_dict = {f"[{row['group_name']}] {row['name']} (ID:{row['id']})": row['id'] for _, row in members.iterrows()}
+        member_dict = {f"[{sv(row['group_name'], '소속 없음')}] {row['name']} (ID:{row['id']})": row['id'] for _, row in members.iterrows()}
 
         with col_lg_add:
             with st.expander("➕ 새 상담 일지 작성", expanded=True):
@@ -1461,7 +1474,7 @@ elif menu == MENU_LOG:
                             curr_lg_dt = today_kst()
                         ed_log_date = st.date_input("상담 일자", curr_lg_dt)
                         ed_topic = st.text_input("상담 주제", value=target_lg['topic'])
-                        ed_details = st.text_area("상세 내용", value=target_lg['details'] if target_lg['details'] else "")
+                        ed_details = st.text_area("상세 내용", value=sv(target_lg['details']))
 
                         # [수정 6] 삭제는 체크해야만 실행
                         confirm_lg_del = st.checkbox("이 상담 일지를 삭제합니다 (되돌릴 수 없음)")
@@ -1514,7 +1527,7 @@ elif menu == MENU_PORTFOLIO:
                 hr = hit.iloc[0]
                 st.session_state["pf_group_filter"] = "전체 학교"
                 st.session_state["pf_name_search"] = ""
-                st.session_state["pf_student_select"] = (f"[{hr['group_name']}] {hr['name']} (ID:{hr['id']})"
+                st.session_state["pf_student_select"] = (f"[{sv(hr['group_name'], '소속 없음')}] {hr['name']} (ID:{hr['id']})"
                                                          + (" · 퇴원" if hr['status'] == '퇴원' else ""))
         f_c1, f_c2 = st.columns([1, 2])
         all_grps_portfolio = ["전체 학교"] + sorted([g for g in members['group_name'].dropna().unique() if g])
@@ -1531,7 +1544,7 @@ elif menu == MENU_PORTFOLIO:
             st.warning("검색 조건과 일치하는 학생이 없습니다.")
         else:
             member_dict = {
-                f"[{row['group_name']}] {row['name']} (ID:{row['id']})" + (" · 퇴원" if row['status'] == '퇴원' else ""): row['id']
+                f"[{sv(row['group_name'], '소속 없음')}] {row['name']} (ID:{row['id']})" + (" · 퇴원" if row['status'] == '퇴원' else ""): row['id']
                 for _, row in filtered_members.iterrows()
             }
             selected_label = st.selectbox("조회할 학생 선택", list(member_dict.keys()), key="pf_student_select")
@@ -1539,7 +1552,7 @@ elif menu == MENU_PORTFOLIO:
 
             with engine.connect() as conn:
                 m_info = pd.read_sql_query(text("SELECT * FROM members WHERE id = :id"), conn, params={"id": selected_id}).iloc[0]
-                st.markdown(f"### 👤 {m_info['name']} 학생 ({m_info['group_name']})")
+                st.markdown(f"### 👤 {m_info['name']} 학생 ({sv(m_info['group_name'], '소속 없음')})")
                 my_classes = pd.read_sql_query(text("""
                     SELECT c.id, c.name FROM class_members cm JOIN classes c ON c.id = cm.class_id
                     WHERE cm.member_id = :id ORDER BY c.name
@@ -1549,7 +1562,7 @@ elif menu == MENU_PORTFOLIO:
                     JOIN class_members cm ON cm.class_id = s.class_id
                     WHERE cm.member_id = :id ORDER BY s.weekday, s.start_time
                 """), conn, params={"id": selected_id})
-                st.write(f"📞 연락처: {m_info['contact'] or '-'} | 📝 학습 메모: {m_info['notes'] or '-'}")
+                st.write(f"📞 연락처: {sv(m_info['contact'], '-')} | 📝 학습 메모: {sv(m_info['notes'], '-')}")
                 if my_classes.empty:
                     st.write("🏫 수강 반: 배정된 반 없음")
                 else:
@@ -1778,8 +1791,8 @@ elif menu == MENU_CLASS:
                 cur = classes_all[classes_all["id"] == ed_id].iloc[0]
                 with st.form(f"class_edit_form_{ed_id}"):
                     e_name = st.text_input("반 이름 *", value=cur["name"])
-                    e_grade = st.text_input("학년", value=cur["grade"] or "")
-                    e_notes = st.text_input("메모", value=cur["notes"] or "")
+                    e_grade = st.text_input("학년", value=sv(cur["grade"]))
+                    e_notes = st.text_input("메모", value=sv(cur["notes"]))
                     e_active = st.checkbox("운영 중 (끄면 시간표·오늘 화면에서 숨겨짐)", value=bool(cur["active"]))
                     confirm_cls_del = st.checkbox("이 반을 완전히 삭제합니다 (수업 시간·학생 배정도 삭제, 출결 기록은 남음)")
                     s1, s2 = st.columns(2)
@@ -1867,7 +1880,7 @@ elif menu == MENU_CLASS:
             if students.empty:
                 st.info("먼저 '구성원 등록/목록'에서 학생을 등록해 주세요.")
             else:
-                label_of = {int(r["id"]): f"{r['name']} ({r['group_name'] or '소속 없음'}) · ID {r['id']}" for _, r in students.iterrows()}
+                label_of = {int(r["id"]): f"{r['name']} ({sv(r['group_name'], '소속 없음')}) · ID {r['id']}" for _, r in students.iterrows()}
                 cur_ids = [int(i) for i in current["member_id"] if int(i) in label_of]
                 # [수정 16] 양식(form) 안에 넣어서, 학생을 고르는 동안에는 화면을 다시 그리지 않음
                 #           → '저장'을 누를 때 한 번만 실행되어 흐려짐이 없어짐
