@@ -121,6 +121,8 @@ def init_db():
             "class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL", "quiz_format TEXT DEFAULT ''",
         ]:
             conn.execute(text(f"ALTER TABLE scores ADD COLUMN IF NOT EXISTS {col_sql};"))
+        # [수정 25] 출결과 함께 과제 검사 결과 (완료 / 미흡 / 안 함)
+        conn.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS homework_status TEXT DEFAULT '';"))
         # [수정 19] 수업 일지: 반 + 날짜마다 수업 내용, 과제, 제출일
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS lessons (
@@ -150,6 +152,7 @@ EXAM_HELP = {
     "수업 테스트": "OX·빈칸·단답 테스트를 반 학생 전체 표로 한 번에 입력해요. 맞은 개수만 적으면 정답률이 자동 계산돼요.",
     "기타": "사설 모의고사, 단원평가 등 점수와 만점만 기록해요.",
 }
+HW_OPTIONS = ["-", "완료", "미흡", "안 함"]   # [수정 25] 과제 검사
 SCHOOL_TERMS = ["1학기 중간", "1학기 기말", "2학기 중간", "2학기 기말"]
 QUIZ_FORMATS = ["OX", "빈칸", "단답", "혼합"]
 SCORE_DEFAULTS = dict(feedback="", reading_score=None, literature_score=None, grammar_score=None,
@@ -425,6 +428,27 @@ def student_button(member_id, name, key):
     st.button(f"👤 {name} 학생 종합 조회 →", key=key, on_click=go_student, args=(member_id,), type="primary")
 
 
+def student_table(df_show, member_ids, names, key, hint="👆 맨 왼쪽 네모 칸을 누르면 그 학생의 종합 조회로 갈 수 있어요."):
+    """[수정 26] 학생이 들어 있는 표: 줄을 고르면 '학생 종합 조회 →' 버튼이 나옴"""
+    st.caption(hint)
+    ev = st.dataframe(df_show, hide_index=True, width="stretch",
+                      on_select="rerun", selection_mode="single-row", key=key)
+    if ev.selection.rows:
+        i = ev.selection.rows[0]
+        if i < len(member_ids):
+            student_button(int(member_ids[i]), names[i], f"{key}_go")
+    return ev
+
+
+def hw_summary(df, col="과제"):
+    """과제 검사 결과를 '완료 3 · 미흡 1 · 안 함 1' 형태로"""
+    if df is None or df.empty or col not in df:
+        return ""
+    vals = df[col].fillna("").tolist()
+    parts = [f"{o} {vals.count(o)}" for o in HW_OPTIONS[1:] if vals.count(o)]
+    return " · ".join(parts)
+
+
 # 0. 오늘 (첫 화면) [수정 10, 13]
 if menu == MENU_TODAY:
     t = today_kst()
@@ -447,7 +471,7 @@ if menu == MENU_TODAY:
         """, conn)
         att_today = pd.read_sql_query(text("""
             SELECT a.member_id, a.class_id, m.name AS 이름, m.group_name AS 소속,
-                   COALESCE(c.name, '') AS 반, a.status AS 상태
+                   COALESCE(c.name, '') AS 반, a.status AS 상태, COALESCE(a.homework_status, '') AS 과제
             FROM attendance a JOIN members m ON a.member_id = m.id
             LEFT JOIN classes c ON c.id = a.class_id
             WHERE a.event_date = :d ORDER BY c.name, m.name
@@ -516,6 +540,10 @@ if menu == MENU_TODAY:
                     if not prev_hw.empty:
                         h = prev_hw.iloc[0]
                         a.markdown(md(f"📝 **지난 과제** ({h['lesson_date'][5:].replace('-', '/')} 수업): {h['homework']}"))
+                        # [수정 25] 과제 검사 결과
+                        my_att_hw = att_today[att_today["class_id"] == r.id] if not att_today.empty else att_today
+                        hs = hw_summary(my_att_hw)
+                        a.caption(f"과제 검사: {hs}" if hs else "과제 검사: 아직 안 함")
                     b.button("출결·수업 기록 →", key=f"go_att_{r.id}_{r.start_time}",
                              on_click=go_class_attendance, args=(r.name,), width="stretch")
                     # [수정 23] 오늘 수업 기록을 그 자리에서 펼쳐 보기
@@ -539,6 +567,12 @@ if menu == MENU_TODAY:
                                     who = my_att[my_att["상태"] == stt]["이름"].tolist()
                                     if who:
                                         st.write(f"{stt} {len(who)}명: " + ", ".join(who))
+                                if hw_summary(my_att):
+                                    st.markdown("**과제 검사**")
+                                    for o in HW_OPTIONS[1:]:
+                                        who = my_att[my_att["과제"] == o]["이름"].tolist()
+                                        if who:
+                                            st.write(f"{o} {len(who)}명: " + ", ".join(who))
                     else:
                         a.caption("📖 오늘 수업 기록 아직 없음")
 
@@ -776,7 +810,7 @@ elif menu == MENU_MEMBERS:
 
         st.caption(f"검색 결과: 총 **{len(filtered_df)}명** / 전체 {len(df_members_raw)}명")
         # [수정 11] 왼쪽 0,1,2 번호 칸 숨기고, 빈칸의 None은 비워서 표시
-        st.dataframe(filtered_df.fillna(""), hide_index=True, width="stretch")
+        student_table(filtered_df.fillna(""), filtered_df["ID"].tolist(), filtered_df["이름"].tolist(), "member_list_tbl")
 
 # 2. 출결 체크
 elif menu == MENU_ATT:
@@ -830,18 +864,31 @@ elif menu == MENU_ATT:
                     ORDER BY m.name
                 """), conn, params={"c": cid})
                 existing = pd.read_sql_query(text(
-                    "SELECT member_id, status FROM attendance WHERE class_id = :c AND event_date = :d"
+                    "SELECT member_id, status, homework_status FROM attendance WHERE class_id = :c AND event_date = :d"
                 ), conn, params={"c": cid, "d": str(bdate)})
+                # [수정 25] 이 날 검사할 과제: 이 날짜 이전 수업에서 낸 가장 최근 과제
+                hw_due = pd.read_sql_query(text("""
+                    SELECT lesson_date, homework, due_date FROM lessons
+                    WHERE class_id = :c AND lesson_date < :d AND COALESCE(homework, '') <> ''
+                    ORDER BY lesson_date DESC LIMIT 1
+                """), conn, params={"c": cid, "d": str(bdate)})
 
             if roster.empty:
                 st.info("이 반에 배정된 학생이 없습니다. '반·시간표 관리 → ③ 학생 배정'에서 추가해 주세요.")
             else:
                 prev = dict(zip(existing["member_id"], existing["status"]))
+                prev_hw = {m: (sv(h) or "-") for m, h in zip(existing["member_id"], existing["homework_status"])}
+                if not hw_due.empty:
+                    h0 = hw_due.iloc[0]
+                    due_txt = f" · 제출 {sv(h0['due_date'])[5:].replace('-', '/')}" if sv(h0["due_date"]) else ""
+                    st.info(md(f"📝 **검사할 과제** ({h0['lesson_date'][5:].replace('-', '/')} 수업): "
+                               f"{h0['homework']}{due_txt}  \n표의 '과제' 칸에서 완료 / 미흡 / 안 함을 골라 주세요."))
                 edit_df = pd.DataFrame({
                     "학생ID": roster["id"],
                     "이름": roster["name"],
                     "소속": roster["group_name"].fillna(""),
                     "출결": [prev.get(i, "출석") for i in roster["id"]],
+                    "과제": [prev_hw.get(i, "-") for i in roster["id"]],
                 })
                 if prev:
                     st.caption("✅ 이 날짜에 저장된 출결을 불러왔어요. 고친 뒤 다시 저장하면 덮어씁니다.")
@@ -853,24 +900,29 @@ elif menu == MENU_ATT:
                     column_config={
                         "학생ID": None,
                         "출결": st.column_config.SelectboxColumn("출결", options=STATUS_OPTIONS, required=True),
+                        "과제": st.column_config.SelectboxColumn("과제", options=HW_OPTIONS, required=True,
+                                                               help="지난 시간 과제 검사 결과. 검사할 과제가 없으면 '-'"),
                     },
                     disabled=["이름", "소속"],
                     hide_index=True,
                     width="stretch",
                     key=f"bulk_editor_{cid}_{bdate}",
                 )
-                if st.button(f"💾 {cname} 출결 {len(edited)}명 한 번에 저장", type="primary"):
+                if st.button(f"💾 {cname} 출결·과제 {len(edited)}명 한 번에 저장", type="primary"):
                     with engine.begin() as conn:
                         for _, r in edited.iterrows():
                             conn.execute(text(
                                 "DELETE FROM attendance WHERE member_id = :m AND event_date = :d AND class_id = :c"
                             ), {"m": int(r["학생ID"]), "d": str(bdate), "c": cid})
                             conn.execute(text("""
-                                INSERT INTO attendance (member_id, event_date, status, class_id)
-                                VALUES (:m, :d, :s, :c)
-                            """), {"m": int(r["학생ID"]), "d": str(bdate), "s": r["출결"], "c": cid})
+                                INSERT INTO attendance (member_id, event_date, status, class_id, homework_status)
+                                VALUES (:m, :d, :s, :c, :h)
+                            """), {"m": int(r["학생ID"]), "d": str(bdate), "s": r["출결"], "c": cid,
+                                   "h": "" if sv(r["과제"], "-") == "-" else r["과제"]})
                     counts = edited["출결"].value_counts()
-                    st.success(f"{cname} {bdate} 출결 저장 완료 · " + ", ".join(f"{k} {v}명" for k, v in counts.items()))
+                    hw_txt = hw_summary(edited)
+                    st.success(f"{cname} {bdate} 출결 저장 완료 · " + ", ".join(f"{k} {v}명" for k, v in counts.items())
+                               + (f"  |  과제: {hw_txt}" if hw_txt else ""))
 
             # ----- [수정 19] 수업 내용 · 과제 -----
             st.markdown(f"#### 📖 {bdate.strftime('%m월 %d일')}({WEEKDAYS[bdate.weekday()]}) 수업 내용 · 과제")
@@ -1032,13 +1084,16 @@ elif menu == MENU_ATT:
         with engine.connect() as conn:
             recent_att = pd.read_sql_query("""
                 SELECT a.event_date AS 날짜, m.name AS 이름, m.group_name AS 소속,
-                       COALESCE(c.name, '') AS 반, a.status AS 출결상태
+                       COALESCE(c.name, '') AS 반, a.status AS 출결상태,
+                       COALESCE(a.homework_status, '') AS 과제, a.member_id
                 FROM attendance a
                 JOIN members m ON a.member_id = m.id
                 LEFT JOIN classes c ON c.id = a.class_id
                 ORDER BY a.id DESC LIMIT 10
             """, conn)
-        st.dataframe(recent_att, hide_index=True, width="stretch")
+        if not recent_att.empty:
+            student_table(recent_att.drop(columns=["member_id"]).fillna(""), recent_att["member_id"].tolist(),
+                          recent_att["이름"].tolist(), "att_recent_tbl")
 
 # 3. 성적 입력 — 시험 종류별 [수정 21]
 elif menu == MENU_SCORE:
@@ -1404,7 +1459,7 @@ elif menu == MENU_SCORE:
                 SELECT COALESCE(s.exam_type, '모의고사') AS 종류, s.record_date AS 일자, m.name AS 이름,
                        s.category AS 시험, s.score, s.max_score, COALESCE(s.grade, '') AS 등급,
                        COALESCE(NULLIF(s.exam_scope, ''), s.quiz_format, '') AS "범위·유형",
-                       COALESCE(s.wrong_questions, '') AS 오답
+                       COALESCE(s.wrong_questions, '') AS 오답, s.member_id
                 FROM scores s JOIN members m ON s.member_id = m.id
                 ORDER BY s.id DESC LIMIT 15
             """, conn)
@@ -1412,7 +1467,8 @@ elif menu == MENU_SCORE:
             st.caption("아직 입력한 성적이 없습니다.")
         else:
             recent_sc.insert(4, "점수", [fmt_score(a, b) for a, b in zip(recent_sc["score"], recent_sc["max_score"])])
-            st.dataframe(recent_sc.drop(columns=["score", "max_score"]).fillna(""), hide_index=True, width="stretch")
+            student_table(recent_sc.drop(columns=["score", "max_score", "member_id"]).fillna(""),
+                          recent_sc["member_id"].tolist(), recent_sc["이름"].tolist(), "score_recent_tbl")
 
 # 4. 상담/소통 일지
 elif menu == MENU_LOG:
@@ -1503,12 +1559,15 @@ elif menu == MENU_LOG:
         st.subheader("🕒 최근 등록된 상담 기록 (최신 10건)")
         with engine.connect() as conn:
             recent_lg = pd.read_sql_query("""
-                SELECT l.id AS 번호, l.log_date AS 상담일자, m.name AS 이름, m.group_name AS 소속, l.topic AS 주제, l.details AS 상세내용
+                SELECT l.log_date AS 상담일자, m.name AS 이름, m.group_name AS 소속, l.topic AS 주제,
+                       l.details AS 상세내용, l.member_id
                 FROM logs l
                 JOIN members m ON l.member_id = m.id
                 ORDER BY l.id DESC LIMIT 10
             """, conn)
-        st.dataframe(recent_lg, width="stretch")
+        if not recent_lg.empty:
+            student_table(recent_lg.drop(columns=["member_id"]).fillna(""), recent_lg["member_id"].tolist(),
+                          recent_lg["이름"].tolist(), "log_recent_tbl")
 
 # 5. 개인별 종합 조회 (퇴원생 기록도 볼 수 있도록 전체 학생 대상)
 elif menu == MENU_PORTFOLIO:
@@ -1569,14 +1628,50 @@ elif menu == MENU_PORTFOLIO:
                     st.write(md("🏫 수강 반: " + " / ".join(
                         f"{r.name} ({schedule_text(my_sched[my_sched['class_id'] == r.id]) or '시간 미등록'})"
                         for r in my_classes.itertuples())))
+                    # [수정 26] 같은 반 학생에게 바로 이동
+                    mates = pd.read_sql_query(text("""
+                        SELECT cm.class_id, m.id, m.name FROM class_members cm JOIN members m ON m.id = cm.member_id
+                        WHERE cm.class_id IN (SELECT class_id FROM class_members WHERE member_id = :id)
+                          AND m.id <> :id AND (m.status = '재원' OR m.status IS NULL)
+                        ORDER BY m.name
+                    """), conn, params={"id": selected_id})
+                    pop_cols = st.columns(max(len(my_classes), 1) + 2)
+                    for j, r in enumerate(my_classes.itertuples()):
+                        cm_ = mates[mates["class_id"] == r.id]
+                        with pop_cols[j].popover(f"👥 {r.name} ({len(cm_) + 1}명)", width="stretch"):
+                            if cm_.empty:
+                                st.caption("같은 반 다른 학생이 없어요.")
+                            for mm in cm_.itertuples():
+                                st.button(f"👤 {mm.name}", key=f"mate_{r.id}_{mm.id}", on_click=go_student,
+                                          args=(mm.id,), width="stretch")
                 st.divider()
 
                 col_att, col_score = st.columns([1, 1.4])
 
                 with col_att:
-                    st.subheader("📅 최근 출결 현황")
-                    df_att = pd.read_sql_query(text("SELECT event_date AS 일자, status AS 상태 FROM attendance WHERE member_id = :id ORDER BY event_date DESC"), conn, params={"id": selected_id})
-                    st.dataframe(df_att, hide_index=True, width="stretch")
+                    st.subheader("📅 출결 · 과제")
+                    df_att = pd.read_sql_query(text("""
+                        SELECT a.event_date AS 일자, COALESCE(c.name, '') AS 반, a.status AS 상태,
+                               COALESCE(a.homework_status, '') AS 과제
+                        FROM attendance a LEFT JOIN classes c ON c.id = a.class_id
+                        WHERE a.member_id = :id ORDER BY a.event_date DESC
+                    """), conn, params={"id": selected_id})
+                    if df_att.empty:
+                        st.caption("출결 기록이 없습니다.")
+                    else:
+                        # [수정 25] 출석률, 과제 완료율
+                        n_all = len(df_att)
+                        n_ok = int(df_att["상태"].isin(["출석", "보강완료"]).sum())
+                        hw_rows = df_att[df_att["과제"].isin(HW_OPTIONS[1:])]
+                        m1, m2 = st.columns(2)
+                        m1.metric("출석률", f"{n_ok / n_all * 100:.0f}%", help=f"출석·보강완료 {n_ok} / 전체 {n_all}회")
+                        if len(hw_rows):
+                            n_done = int((hw_rows["과제"] == "완료").sum())
+                            m2.metric("과제 완료율", f"{n_done / len(hw_rows) * 100:.0f}%",
+                                      help=f"완료 {n_done} / 검사 {len(hw_rows)}회 ({hw_summary(hw_rows)})")
+                        else:
+                            m2.metric("과제 완료율", "-", help="아직 과제 검사 기록이 없어요")
+                        st.dataframe(df_att, hide_index=True, width="stretch")
 
                 # [수정 21] 시험 종류별로 그래프를 나눠서
                 df_sc_all = pd.read_sql_query(text("""
@@ -1754,7 +1849,27 @@ elif menu == MENU_CLASS:
             "학생 수": [f"{count_map.get(i, 0)}명" for i in classes_all["id"]],
             "상태": ["운영 중" if a else "운영 종료" for a in classes_all["active"]],
         })
-        st.dataframe(overview, hide_index=True, width="stretch")
+        # [수정 26] 반을 고르면 그 반 학생이 버튼으로 나오고, 누르면 종합 조회로 이동
+        st.caption("👆 맨 왼쪽 네모 칸을 누르면 그 반 학생 목록이 보여요.")
+        ev_cls = st.dataframe(overview, hide_index=True, width="stretch",
+                              on_select="rerun", selection_mode="single-row", key="class_overview_tbl")
+        if ev_cls.selection.rows:
+            crow = classes_all.iloc[ev_cls.selection.rows[0]]
+            with engine.connect() as conn:
+                c_students = pd.read_sql_query(text("""
+                    SELECT m.id, m.name, m.group_name FROM class_members cm JOIN members m ON m.id = cm.member_id
+                    WHERE cm.class_id = :c AND (m.status = '재원' OR m.status IS NULL) ORDER BY m.name
+                """), conn, params={"c": int(crow["id"])})
+            with st.container(border=True):
+                st.markdown(f"**👥 {crow['name']}** 학생 {len(c_students)}명 · 이름을 누르면 종합 조회로 이동해요")
+                if c_students.empty:
+                    st.caption("배정된 학생이 없어요. 아래 ③ 학생 배정에서 추가해 주세요.")
+                else:
+                    btn_cols = st.columns(4)
+                    for k, stu in enumerate(c_students.itertuples()):
+                        btn_cols[k % 4].button(f"👤 {stu.name}", key=f"cls_stu_{crow['id']}_{stu.id}",
+                                               on_click=go_student, args=(stu.id,), width="stretch",
+                                               help=sv(stu.group_name, "소속 없음"))
 
     tab1, tab2, tab3 = st.tabs(["① 반 만들기·수정", "② 수업 시간", "③ 학생 배정"])
 
@@ -1916,7 +2031,8 @@ elif menu == MENU_BACKUP:
         """, conn)
 
         df_exp_attendance = pd.read_sql_query("""
-            SELECT a.id AS 출결ID, a.event_date AS 일자, m.name AS 학생이름, m.group_name AS 소속_학교, a.status AS 출결상태
+            SELECT a.id AS 출결ID, a.event_date AS 일자, m.name AS 학생이름, m.group_name AS 소속_학교, a.status AS 출결상태,
+                   COALESCE(a.homework_status, '') AS 과제검사
             FROM attendance a
             JOIN members m ON a.member_id = m.id
             ORDER BY a.event_date DESC, a.id DESC
