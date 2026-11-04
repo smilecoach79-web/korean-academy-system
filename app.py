@@ -402,6 +402,16 @@ def go_class_attendance(class_name):
     st.session_state["bulk_date"] = today_kst()
 
 
+# [수정 23] 어디서든 학생을 누르면 그 학생의 개인별 종합 조회로 이동
+def go_student(member_id):
+    st.session_state["menu"] = MENU_PORTFOLIO
+    st.session_state["pf_target_id"] = int(member_id)
+
+
+def student_button(member_id, name, key):
+    st.button(f"👤 {name} 학생 종합 조회 →", key=key, on_click=go_student, args=(member_id,), type="primary")
+
+
 # 0. 오늘 (첫 화면) [수정 10, 13]
 if menu == MENU_TODAY:
     t = today_kst()
@@ -431,19 +441,21 @@ if menu == MENU_TODAY:
         """), conn, params={"d": t_str})
         log_week = conn.execute(text("SELECT COUNT(*) FROM logs WHERE log_date >= :d"), {"d": week_ago}).scalar()
         recent_logs = pd.read_sql_query("""
-            SELECT l.log_date AS 일자, m.name AS 이름, m.group_name AS 소속, l.topic AS 주제
+            SELECT l.log_date AS 일자, m.name AS 이름, m.group_name AS 소속, l.topic AS 주제,
+                   l.details, l.member_id
             FROM logs l JOIN members m ON l.member_id = m.id
             ORDER BY l.log_date DESC, l.id DESC LIMIT 5
         """, conn)
         recent_scores = pd.read_sql_query("""
             SELECT s.record_date AS 일자, COALESCE(s.exam_type, '모의고사') AS 종류, m.name AS 이름,
-                   s.category AS 시험, s.score, s.max_score
+                   s.category AS 시험, s.score, s.max_score, s.member_id, m.group_name,
+                   s.grade, s.exam_scope, s.quiz_format, s.wrong_questions, s.feedback,
+                   s.reading_score, s.literature_score, s.grammar_score, s.school_avg
             FROM scores s JOIN members m ON s.member_id = m.id
             ORDER BY s.record_date DESC, s.id DESC LIMIT 5
         """, conn)
         if not recent_scores.empty:
             recent_scores["점수"] = [fmt_score(a, b) for a, b in zip(recent_scores["score"], recent_scores["max_score"])]
-            recent_scores = recent_scores.drop(columns=["score", "max_score"])
 
     # 오늘 출석해야 하는 학생: 오늘 수업이 있으면 그 반 학생들, 없으면 재원생 전체
     if not today_classes.empty:
@@ -470,7 +482,7 @@ if menu == MENU_TODAY:
             # [수정 19] 반별 수업 기록: 오늘 기록 여부 + 지난 시간 과제
             with engine.connect() as conn:
                 lesson_hist = pd.read_sql_query(text("""
-                    SELECT class_id, lesson_date, homework, due_date FROM lessons
+                    SELECT class_id, lesson_date, content, homework, due_date, notes FROM lessons
                     WHERE lesson_date <= :d ORDER BY lesson_date DESC
                 """), conn, params={"d": t_str})
             for r in today_classes.itertuples():
@@ -491,28 +503,91 @@ if menu == MENU_TODAY:
                     if not prev_hw.empty:
                         h = prev_hw.iloc[0]
                         a.markdown(md(f"📝 **지난 과제** ({h['lesson_date'][5:].replace('-', '/')} 수업): {h['homework']}"))
-                    a.caption("📖 오늘 수업 기록 ✅" if logged_today else "📖 오늘 수업 기록 아직 없음")
-                    b.button("출결 입력 →", key=f"go_att_{r.id}_{r.start_time}",
+                    b.button("출결·수업 기록 →", key=f"go_att_{r.id}_{r.start_time}",
                              on_click=go_class_attendance, args=(r.name,), width="stretch")
+                    # [수정 23] 오늘 수업 기록을 그 자리에서 펼쳐 보기
+                    if logged_today:
+                        lt = my_ls[my_ls["lesson_date"] == t_str].iloc[0]
+                        with a.popover("📖 오늘 수업 기록 ✅ 보기"):
+                            st.markdown(f"**{r.name}** · {t.strftime('%m/%d')} {r.start_time}~{r.end_time}")
+                            st.markdown("**수업 내용**")
+                            st.write(md(lt["content"] or "-"))
+                            st.markdown("**과제**")
+                            hw_txt = lt["homework"] or "-"
+                            if lt["homework"] and lt["due_date"]:
+                                hw_txt += f"  \n(제출: {lt['due_date'][5:].replace('-', '/')})"
+                            st.write(md(hw_txt))
+                            if lt["notes"]:
+                                st.caption(md(f"메모: {lt['notes']}"))
+                            my_att = att_today[att_today["class_id"] == r.id] if not att_today.empty else att_today
+                            if not my_att.empty:
+                                st.markdown("**오늘 출결**")
+                                for stt in STATUS_OPTIONS:
+                                    who = my_att[my_att["상태"] == stt]["이름"].tolist()
+                                    if who:
+                                        st.write(f"{stt} {len(who)}명: " + ", ".join(who))
+                    else:
+                        a.caption("📖 오늘 수업 기록 아직 없음")
 
         st.subheader("📅 오늘 출결")
         if att_today.empty:
             st.info("오늘 입력된 출결이 아직 없습니다.")
         else:
-            st.dataframe(att_today.drop(columns=["member_id", "class_id"]), hide_index=True, width="stretch")
+            st.caption("👆 맨 왼쪽 네모 칸을 누르면 그 학생의 종합 조회로 갈 수 있어요.")
+            ev_att = st.dataframe(att_today.drop(columns=["member_id", "class_id"]), hide_index=True, width="stretch",
+                                  on_select="rerun", selection_mode="single-row", key="today_att_tbl")
+            if ev_att.selection.rows:
+                ra = att_today.iloc[ev_att.selection.rows[0]]
+                student_button(ra["member_id"], ra["이름"], "go_stu_att")
 
     with col_r:
         st.subheader("💬 최근 상담")
         if recent_logs.empty:
             st.info("상담 기록이 없습니다.")
         else:
-            st.dataframe(recent_logs, hide_index=True, width="stretch")
+            st.caption("👆 맨 왼쪽 네모 칸을 누르면 상담 내용 전체가 보여요.")
+            ev_lg = st.dataframe(recent_logs[["일자", "이름", "소속", "주제"]], hide_index=True, width="stretch",
+                                 on_select="rerun", selection_mode="single-row", key="today_log_tbl")
+            if ev_lg.selection.rows:
+                rl = recent_logs.iloc[ev_lg.selection.rows[0]]
+                with st.container(border=True):
+                    st.markdown(f"**{rl['일자']} · {rl['이름']}** ({rl['소속'] or '소속 없음'})")
+                    st.markdown(f"**주제:** {rl['주제']}")
+                    st.write(md(rl["details"] or "(상세 내용 없음)"))
+                    student_button(rl["member_id"], rl["이름"], "go_stu_log")
 
         st.subheader("📝 최근 시험 결과")
         if recent_scores.empty:
             st.info("성적 기록이 없습니다.")
         else:
-            st.dataframe(recent_scores, hide_index=True, width="stretch")
+            st.caption("👆 맨 왼쪽 네모 칸을 누르면 범위·틀린 문항·피드백이 보여요.")
+            ev_sc = st.dataframe(recent_scores[["일자", "종류", "이름", "시험", "점수"]], hide_index=True, width="stretch",
+                                 on_select="rerun", selection_mode="single-row", key="today_score_tbl")
+            if ev_sc.selection.rows:
+                rs = recent_scores.iloc[ev_sc.selection.rows[0]]
+
+                def _v(x):
+                    return "" if x is None or (isinstance(x, float) and pd.isna(x)) else str(x)
+
+                with st.container(border=True):
+                    st.markdown(f"**{EXAM_ICONS.get(rs['종류'], '')} {rs['시험']}** · {rs['일자']}")
+                    st.markdown(f"**{rs['이름']}** ({_v(rs['group_name']) or '소속 없음'}) · 점수 **{rs['점수']}**"
+                                + (f" · {rs['grade']}" if _v(rs['grade']) else ""))
+                    if rs["종류"] == "수업 테스트" and rs["max_score"]:
+                        st.caption(f"정답률 {float(rs['score']) / float(rs['max_score']) * 100:.0f}%"
+                                   + (f" · 유형 {rs['quiz_format']}" if _v(rs['quiz_format']) else ""))
+                    if rs["종류"] == "모의고사" and _v(rs["reading_score"]):
+                        st.caption(f"독서 {float(rs['reading_score']):g} · 문학 {float(rs['literature_score'] or 0):g} · "
+                                   f"문법·화법 {float(rs['grammar_score'] or 0):g}")
+                    if _v(rs["school_avg"]):
+                        st.caption(f"학교 평균 {float(rs['school_avg']):g}")
+                    if _v(rs["exam_scope"]):
+                        st.write(md(f"**범위:** {rs['exam_scope']}"))
+                    if _v(rs["wrong_questions"]):
+                        st.write(md(f"**틀린 문항:** {rs['wrong_questions']}"))
+                    if _v(rs["feedback"]):
+                        st.write(md(f"**피드백:** {rs['feedback']}"))
+                    student_button(rs["member_id"], rs["이름"], "go_stu_score")
 
 # 1. 구성원 등록 및 목록
 elif menu == MENU_MEMBERS:
@@ -1431,6 +1506,16 @@ elif menu == MENU_PORTFOLIO:
     if members.empty:
         st.warning("등록된 학생이 없습니다.")
     else:
+        # [수정 23] 다른 화면에서 학생을 눌러 넘어왔으면, 필터를 풀고 그 학생을 선택
+        if "pf_target_id" in st.session_state:
+            tid = st.session_state.pop("pf_target_id")
+            hit = members[members["id"] == tid]
+            if not hit.empty:
+                hr = hit.iloc[0]
+                st.session_state["pf_group_filter"] = "전체 학교"
+                st.session_state["pf_name_search"] = ""
+                st.session_state["pf_student_select"] = (f"[{hr['group_name']}] {hr['name']} (ID:{hr['id']})"
+                                                         + (" · 퇴원" if hr['status'] == '퇴원' else ""))
         f_c1, f_c2 = st.columns([1, 2])
         all_grps_portfolio = ["전체 학교"] + sorted([g for g in members['group_name'].dropna().unique() if g])
         chosen_grp = f_c1.selectbox("🏫 학교/그룹별 필터", all_grps_portfolio, key="pf_group_filter")
