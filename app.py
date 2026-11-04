@@ -368,8 +368,18 @@ section[data-testid="stSidebar"] [role="radiogroup"] p {
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.markdown("### 📚 국어 관리 시스템")
-    st.caption(f"오늘 {today_kst().strftime('%Y년 %m월 %d일')} ({'월화수목금토일'[today_kst().weekday()]})")
+    # [수정 22] 사이드바 제목과 날짜 글씨 키우기
+    _t = today_kst()
+    st.markdown(f"""
+    <div style="margin: 4px 0 6px 0;">
+        <div style="font-size: 1.85rem; font-weight: 800; color: #262730; letter-spacing: -0.04em; line-height: 1.3; white-space: nowrap;">
+            📚 국어 관리 시스템
+        </div>
+        <div style="font-size: 1.15rem; color: #5f6475; margin-top: 8px;">
+            오늘 {_t.strftime('%Y년 %m월 %d일')} ({WEEKDAYS[_t.weekday()]})
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     st.divider()
     menu = st.radio("메뉴 선택", [
         MENU_TODAY, MENU_TIMETABLE, MENU_ATT, MENU_SCORE, MENU_LOG, MENU_PORTFOLIO,
