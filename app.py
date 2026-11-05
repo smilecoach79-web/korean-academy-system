@@ -252,6 +252,9 @@ def load_sessions(start_d, end_d):
                              event_id=int(r.event_id)))
         d += timedelta(days=1)
     out = pd.DataFrame(rows, columns=SESSION_COLS)
+    # [수정 39] 수업이 없는 날(빈 목록)에도 '휴강 여부'가 참/거짓 칸이 되도록 고정
+    #           (안 그러면 걸러내기가 '칸 고르기'로 잘못 동작해서 오류가 남)
+    out["canceled"] = out["canceled"].astype(bool)
     if out.empty:
         return out
     return out.sort_values(["date", "start_time", "name"]).reset_index(drop=True)
@@ -715,8 +718,9 @@ if menu == MENU_TODAY:
 
     # [수정 27] 오늘 실제 수업 = 정규 + 보강 - 휴강
     sess_today = load_sessions(t, t)
-    canceled_today = sess_today[sess_today["canceled"]]
-    today_classes = sess_today[~sess_today["canceled"]].rename(columns={"class_id": "id"}).reset_index(drop=True)
+    is_cx = sess_today["canceled"].astype(bool)
+    canceled_today = sess_today[is_cx]
+    today_classes = sess_today[~is_cx].rename(columns={"class_id": "id"}).reset_index(drop=True)
     upcoming = load_sessions(t + timedelta(days=1), t + timedelta(days=7))
     upcoming = upcoming[(upcoming["kind"] == "보강") | (upcoming["canceled"])] if not upcoming.empty else upcoming
 
@@ -898,9 +902,10 @@ elif menu == MENU_MEMBERS:
     with engine.connect() as conn:
         all_cls = pd.read_sql_query("SELECT id, name, active FROM classes ORDER BY active DESC, name", conn)
     cls_name_of = {int(r["id"]): r["name"] + ("" if r["active"] else " (운영 종료)") for _, r in all_cls.iterrows()}
-    act_names = list(all_cls[all_cls["active"]]["name"])
+    cls_active = all_cls["active"].astype(bool)   # [수정 39] 반이 하나도 없을 때도 안전하게
+    act_names = list(all_cls[cls_active]["name"])
     all_names = list(all_cls["name"])
-    inactive_names = set(all_cls[~all_cls["active"]]["name"])
+    inactive_names = set(all_cls[~cls_active]["name"])
 
     def cls_label(n):
         return n + (" (운영 종료)" if n in inactive_names else "")
@@ -2319,7 +2324,7 @@ elif menu == MENU_TIMETABLE:
                 if ev_kind == "보강":
                     s_str, e_str = ev_s.strftime("%H:%M"), ev_e.strftime("%H:%M")
                     day_sess = load_sessions(ev_date, ev_date)
-                    day_sess = day_sess[~day_sess["canceled"]] if not day_sess.empty else day_sess
+                    day_sess = day_sess[~day_sess["canceled"].astype(bool)] if not day_sess.empty else day_sess
                     clash = day_sess[(day_sess["start_time"] < e_str) & (day_sess["end_time"] > s_str)] if not day_sess.empty else day_sess
                     if e_str <= s_str:
                         st.warning("종료 시각이 시작 시각보다 늦어야 해요. (오후 7시는 19:00)")
@@ -2419,7 +2424,7 @@ elif menu == MENU_TIMETABLE:
     if sess.empty:
         st.info("이 주에는 수업이 없습니다. '반·시간표 관리'에서 반과 수업 시간을 등록해 주세요.")
     else:
-        live = sess[~sess["canceled"]]
+        live = sess[~sess["canceled"].astype(bool)]
         total_min = sum(minutes(r.end_time) - minutes(r.start_time) for r in live.itertuples() if r.start_time and r.end_time)
         n_mk = int((sess["kind"] == "보강").sum())
         n_cx = int(sess["canceled"].sum())
