@@ -1358,11 +1358,31 @@ elif menu == MENU_ATT:
                     st.session_state["flash"] = "🗑️ 수업 기록을 삭제했어요."
                     st.rerun()
 
+            # [수정 38] 지난 수업 기록: 표 대신 카드로 — 긴 내용도 잘리지 않고 다 보이게
+            def open_lesson_date(d_str):
+                st.session_state["bulk_date"] = datetime.strptime(d_str, "%Y-%m-%d").date()
+
             with st.expander(f"📚 {cname} 지난 수업 기록 ({len(past_ls)}회)"):
                 if past_ls.empty:
                     st.caption("아직 저장된 수업 기록이 없습니다.")
                 else:
-                    st.dataframe(past_ls.fillna(""), hide_index=True, width="stretch")
+                    for k_, l_ in enumerate(past_ls.itertuples()):
+                        ld = datetime.strptime(l_.날짜, "%Y-%m-%d").date()
+                        is_cur = ld == bdate
+                        with st.container(border=True):
+                            h1, h2 = st.columns([4, 1.3])
+                            h1.markdown(f"**{ld.month}/{ld.day}({WEEKDAYS[ld.weekday()]})**"
+                                        + ("　`지금 열려 있는 날짜`" if is_cur else ""))
+                            if not is_cur:
+                                h2.button("✏️ 이 날 기록 열기", key=f"open_ls_{cid}_{l_.날짜}",
+                                          on_click=open_lesson_date, args=(l_.날짜,), width="stretch")
+                            st.markdown(md(f"📖 **수업 내용**  \n{sv(l_.수업내용, '-')}"))
+                            if sv(l_.과제):
+                                due_ = sv(l_.제출일)
+                                st.markdown(md(f"📝 **과제**" + (f" (제출 {due_[5:].replace('-', '/')})" if due_ else "")
+                                               + f"  \n{sv(l_.과제)}"))
+                            if sv(l_.메모):
+                                st.caption(md(f"메모: {sv(l_.메모)}"))
 
         st.divider()
         col_att_add, col_att_edit = st.columns([1.2, 1])
