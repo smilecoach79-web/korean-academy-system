@@ -2364,7 +2364,29 @@ elif menu == MENU_TIMETABLE:
     # ---------- 주간 시간표 (실제 날짜 기준) ----------
     # [수정 28] 반 페이지 바로가기
     if not tt_cls.empty:
-        st.caption("🏫 반 페이지 바로가기")
+        # [수정 37] 제목은 진하고 굵게, 반 버튼은 볼록한 버튼으로 (화면을 바꾸는 버튼 규칙)
+        st.markdown("""
+        <style>
+        [class*="st-key-tt_jump_"] button {
+            background: linear-gradient(180deg, #ffffff 0%, #eef0f4 100%);
+            border: 1px solid #d5d9e0;
+            border-radius: 12px;
+            box-shadow: 0 4px 0 #c3c8d1, 0 6px 10px rgba(0, 0, 0, 0.08);
+            transition: transform 0.08s, box-shadow 0.08s;
+        }
+        [class*="st-key-tt_jump_"] button p { font-size: 1.02rem; font-weight: 700; color: #31333f; }
+        [class*="st-key-tt_jump_"] button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 5px 0 #c3c8d1, 0 8px 14px rgba(0, 0, 0, 0.12);
+            border-color: #e63c3c; color: #e63c3c;
+        }
+        [class*="st-key-tt_jump_"] button:active { transform: translateY(3px); box-shadow: 0 1px 0 #c3c8d1; }
+        </style>
+        <div style="font-size:1.08rem;font-weight:700;color:#262730;margin:4px 0 6px 0">
+            🏫 반 페이지 바로가기
+            <span style="font-size:0.85rem;font-weight:500;color:#5f6475;margin-left:6px">반을 누르면 학생·진도·과제 현황으로 가요</span>
+        </div>
+        """, unsafe_allow_html=True)
         jump_cols = st.columns(min(len(tt_cls), 5))
         for k, c_ in enumerate(tt_cls.itertuples()):
             jump_cols[k % len(jump_cols)].button(c_.name, key=f"tt_jump_{c_.id}", on_click=go_class,
