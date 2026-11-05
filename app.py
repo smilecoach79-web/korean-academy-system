@@ -803,6 +803,17 @@ if menu == MENU_TODAY:
 elif menu == MENU_MEMBERS:
     st.header("👥 구성원 등록 및 목록")
     col_add, col_edit, col_del = st.columns([1, 1, 1])
+    # [수정 33] 학생 등록·수정에서도 수강 반을 고를 수 있게
+    with engine.connect() as conn:
+        all_cls = pd.read_sql_query("SELECT id, name, active FROM classes ORDER BY active DESC, name", conn)
+    cls_name_of = {int(r["id"]): r["name"] + ("" if r["active"] else " (운영 종료)") for _, r in all_cls.iterrows()}
+    active_cls_ids = [int(i) for i in all_cls[all_cls["active"]]["id"]]
+
+    def set_member_classes(conn, member_id, class_ids):
+        conn.execute(text("DELETE FROM class_members WHERE member_id = :m"), {"m": int(member_id)})
+        for cid_ in class_ids:
+            conn.execute(text("INSERT INTO class_members (class_id, member_id) VALUES (:c, :m) ON CONFLICT DO NOTHING"),
+                         {"c": int(cid_), "m": int(member_id)})
 
     # [수정 18] 등록 버튼을 누르면 실행: 같은 이름이 있으면 먼저 확인, 저장 후 입력칸 비우기
     def add_member_cb():
@@ -821,25 +832,34 @@ elif menu == MENU_MEMBERS:
                 "동명이인이 맞다면 위의 '동명이인이 맞습니다'를 체크하고 다시 등록하세요.")
             return
         with engine.begin() as conn:
-            conn.execute(text("""
+            new_id = conn.execute(text("""
                 INSERT INTO members (name, group_name, contact, notes, status, parent_contact, parent_relation)
                 VALUES (:name, :group_name, :contact, :notes, '재원', :pc, :pr)
+                RETURNING id
             """), {"name": nm, "group_name": st.session_state.get("new_group", "").strip(),
                    "contact": st.session_state.get("new_contact", "").strip(),
                    "notes": st.session_state.get("new_notes", "").strip(),
                    "pc": st.session_state.get("new_parent", "").strip(),
-                   "pr": "" if st.session_state.get("new_parent_rel", "-") == "-" else st.session_state.get("new_parent_rel")})
+                   "pr": "" if st.session_state.get("new_parent_rel", "-") == "-" else st.session_state.get("new_parent_rel")}).scalar()
+            picked_cls = st.session_state.get("new_classes", [])
+            if picked_cls:
+                set_member_classes(conn, new_id, picked_cls)
         for k in ["new_name", "new_group", "new_contact", "new_notes", "new_parent"]:
             st.session_state[k] = ""
         st.session_state["new_parent_rel"] = "-"
+        st.session_state["new_classes"] = []
         st.session_state["new_dup_ok"] = False
-        st.session_state["flash"] = f"✅ '{nm}' 학생을 등록했어요."
+        cls_txt = ", ".join(cls_name_of.get(c, "") for c in picked_cls)
+        st.session_state["flash"] = f"✅ '{nm}' 학생을 등록했어요." + (f" (수강 반: {cls_txt})" if cls_txt else "")
 
     with col_add:
         with st.expander("➕ 새 학생 등록", expanded=False):
             with st.form("add_member_form"):
                 st.text_input("학생 이름 *", key="new_name")
-                st.text_input("학교 및 학년/반 (예: 비전고1, 한광고2)", key="new_group")
+                st.text_input("소속 학교·학년", placeholder="평택고1, 한광중3", key="new_group",
+                              help="다니는 학교와 학년이에요. 학원 반은 아래 '수강 반'에서 골라요.")
+                st.multiselect("수강 반 (선택, 여러 개 가능)", active_cls_ids, format_func=lambda i: cls_name_of[i],
+                               key="new_classes", placeholder="반을 고르세요")
                 st.text_input("학생 연락처", placeholder="010-0000-0000", key="new_contact")
                 p1, p2 = st.columns([2, 1])
                 p1.text_input("학부모 연락처", placeholder="010-0000-0000", key="new_parent")
@@ -866,9 +886,16 @@ elif menu == MENU_MEMBERS:
                 with engine.connect() as conn:
                     curr_info = pd.read_sql_query(text("SELECT * FROM members WHERE id = :id"), conn, params={"id": target_edit_id}).iloc[0]
 
+                    cur_cls = [int(i) for i in pd.read_sql_query(
+                        text("SELECT class_id FROM class_members WHERE member_id = :m"), conn,
+                        params={"m": target_edit_id})["class_id"]]
+
                 with st.form("edit_member_form"):
                     edit_name = st.text_input("학생 이름 *", value=curr_info['name'])
-                    edit_group = st.text_input("소속 / 반", value=sv(curr_info['group_name']))
+                    edit_group = st.text_input("소속 학교·학년", value=sv(curr_info['group_name']),
+                                               placeholder="평택고1, 한광중3")
+                    edit_cls = st.multiselect("수강 반", list(cls_name_of.keys()), default=[c for c in cur_cls if c in cls_name_of],
+                                              format_func=lambda i: cls_name_of[i], placeholder="반을 고르세요")
                     edit_contact = st.text_input("학생 연락처", value=sv(curr_info['contact']))
                     ep1, ep2 = st.columns([2, 1])
                     edit_parent = ep1.text_input("학부모 연락처", value=sv(curr_info['parent_contact']))
@@ -888,6 +915,7 @@ elif menu == MENU_MEMBERS:
                                 WHERE id = :id
                             """), {"name": edit_name, "group_name": edit_group, "contact": edit_contact, "notes": edit_notes,
                                    "pc": edit_parent.strip(), "pr": "" if edit_rel == "-" else edit_rel, "id": target_edit_id})
+                            set_member_classes(conn, target_edit_id, edit_cls)
                         st.session_state["flash"] = "✅ " + f"'{edit_name}' 학생 정보가 수정되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
                         st.rerun()
 
@@ -958,7 +986,7 @@ elif menu == MENU_MEMBERS:
 
     with engine.connect() as conn:
         df_members_raw = pd.read_sql_query(f"""
-            SELECT m.id AS "ID", m.name AS 이름, m.group_name AS 소속_학교,
+            SELECT m.id AS "ID", m.name AS 이름, m.group_name AS "학교·학년",
                    (SELECT string_agg(c.name, ', ' ORDER BY c.name)
                       FROM class_members cm JOIN classes c ON c.id = cm.class_id
                      WHERE cm.member_id = m.id) AS 수강반,
@@ -974,13 +1002,13 @@ elif menu == MENU_MEMBERS:
         st.info("등록된 학생이 없습니다. 새 학생을 등록해 보세요.")
     else:
         f_col1, f_col2 = st.columns([1, 2])
-        all_groups = ["전체"] + sorted([g for g in df_members_raw['소속_학교'].dropna().unique() if g])
-        selected_grp = f_col1.selectbox("🏫 학교/그룹별 필터", all_groups, key="filter_group_list")
+        all_groups = ["전체"] + sorted([g for g in df_members_raw['학교·학년'].dropna().unique() if g])
+        selected_grp = f_col1.selectbox("🏫 학교·학년별 필터", all_groups, key="filter_group_list")
         search_kw = f_col2.text_input("🔍 이름·반·메모 검색", placeholder="학생 이름, 반 이름, 메모 키워드를 입력하세요", key="search_kw_list")
 
         filtered_df = df_members_raw.copy()
         if selected_grp != "전체":
-            filtered_df = filtered_df[filtered_df['소속_학교'] == selected_grp]
+            filtered_df = filtered_df[filtered_df['학교·학년'] == selected_grp]
         if search_kw.strip():
             kw = search_kw.strip()
             filtered_df = filtered_df[
@@ -1558,18 +1586,91 @@ elif menu == MENU_SCORE:
             st.warning(ss.pop("sc_msg"))
 
         # ---------- 저장된 성적 수정 · 삭제 ----------
-        st.divider()
-        with st.expander("✏️/🗑️ 저장된 성적 수정·삭제", expanded=False):
+        def load_score_rows(where_sql="", params=None, limit=100):
             with engine.connect() as conn:
-                sc_edit = pd.read_sql_query("""
+                df = pd.read_sql_query(text(f"""
                     SELECT s.*, m.name AS m_name
                     FROM scores s JOIN members m ON s.member_id = m.id
-                    ORDER BY s.record_date DESC, s.id DESC LIMIT 100
-                """, conn)
+                    {where_sql}
+                    ORDER BY s.record_date DESC, s.id DESC LIMIT {int(limit)}
+                """), conn, params=params or {})
+            if not df.empty:
+                df["exam_type"] = df["exam_type"].fillna("모의고사")
+            return df
+
+        def render_score_edit(row, kp):
+            """[수정 32] 성적 하나를 고치는 칸 — 위 '수정·삭제' 칸과 아래 표 선택에서 같이 씀"""
+            sid = int(row["id"])
+            rtype = row["exam_type"]
+
+            def num(v, default=None):
+                return default if v is None or pd.isna(v) else float(v)
+
+            with st.form(f"{kp}_sc_edit_form_{sid}"):
+                e1, e2 = st.columns([2, 1])
+                ed_cat = e1.text_input("시험 이름", value=sv(row["category"]))
+                try:
+                    cur_d = datetime.strptime(row["record_date"], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    cur_d = today_kst()
+                ed_date = e2.date_input("일자", cur_d)
+                if rtype == "모의고사":
+                    a, b, c = st.columns(3)
+                    ed_r = a.number_input("독서", 0.0, 100.0, num(row["reading_score"], 0.0), 0.5)
+                    ed_l = b.number_input("문학", 0.0, 100.0, num(row["literature_score"], 0.0), 0.5)
+                    ed_g = c.number_input("문법·화법", 0.0, 100.0, num(row["grammar_score"], 0.0), 0.5)
+                    ed_score, ed_max = ed_r + ed_l + ed_g, 100.0
+                else:
+                    a, b = st.columns(2)
+                    ed_score = a.number_input("점수" if rtype != "수업 테스트" else "맞은 개수", 0.0, 1000.0,
+                                              num(row["score"], 0.0), 0.5)
+                    ed_max = b.number_input("만점" if rtype != "수업 테스트" else "전체 문항 수", 1.0, 1000.0,
+                                            num(row["max_score"], 100.0), 1.0)
+                g1, g2 = st.columns(2)
+                ed_grade = g1.text_input("등급 / 성취도", value=sv(row["grade"]))
+                ed_scope = g2.text_input("범위", value=sv(row["exam_scope"]))
+                ed_wrong = st.text_input("틀린 문항", value=sv(row["wrong_questions"]))
+                ed_fb = st.text_area("피드백 / 메모", value=sv(row["feedback"]), height=70)
+                confirm_sc = st.checkbox("이 성적을 삭제합니다 (되돌릴 수 없음)")
+                b1, b2 = st.columns(2)
+                do_save = b1.form_submit_button("수정 저장", type="primary")
+                do_del = b2.form_submit_button("삭제")
+            if do_save:
+                if ed_score > ed_max:
+                    st.warning("점수가 만점보다 커요.")
+                else:
+                    params = {"cat": ed_cat.strip(), "d": str(ed_date), "sc": ed_score, "mx": ed_max,
+                              "gr": ed_grade.strip(), "scope": ed_scope.strip(), "wq": ed_wrong.strip(),
+                              "fb": ed_fb.strip(), "id": sid}
+                    extra = ""
+                    if rtype == "모의고사":
+                        extra = ", reading_score = :r, literature_score = :l, grammar_score = :g"
+                        params.update({"r": ed_r, "l": ed_l, "g": ed_g})
+                    with engine.begin() as conn:
+                        conn.execute(text(f"""
+                            UPDATE scores SET category = :cat, record_date = :d, score = :sc, max_score = :mx,
+                                grade = :gr, exam_scope = :scope, wrong_questions = :wq, feedback = :fb {extra}
+                            WHERE id = :id
+                        """), params)
+                    ss.flash = f"✏️ {row['m_name']} · {ed_cat} 성적을 수정했어요."
+                    st.rerun()
+            if do_del:
+                if not confirm_sc:
+                    st.warning("삭제하려면 확인 칸을 먼저 체크해 주세요.")
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": sid})
+                    ss.pop("sc_edit_sel", None)
+                    ss.pop("score_recent_tbl", None)
+                    ss.flash = "🗑️ 성적을 삭제했어요."
+                    st.rerun()
+
+        st.divider()
+        with st.expander("✏️/🗑️ 저장된 성적 찾아서 수정·삭제", expanded=False):
+            sc_edit = load_score_rows()
             if sc_edit.empty:
                 st.info("저장된 성적이 없습니다.")
             else:
-                sc_edit["exam_type"] = sc_edit["exam_type"].fillna("모의고사")
                 f1, f2 = st.columns([1, 2])
                 f_type = f1.selectbox("종류", ["전체"] + EXAM_TYPES, key="sc_edit_type")
                 f_kw = f2.text_input("학생 이름 / 시험 이름 검색", key="sc_edit_kw")
@@ -1580,76 +1681,10 @@ elif menu == MENU_SCORE:
                 if view.empty:
                     st.caption("조건에 맞는 성적이 없습니다.")
                 else:
-                    opts = {f"[{r['record_date']}] {EXAM_ICONS.get(r['exam_type'], '')} {r['m_name']} · {r['category']} "
+                    opts = {f"[{r['record_date']}] {EXAM_ICONS.get(r['exam_type'], '')} {r['m_name']} · {sv(r['category'])} "
                             f"({fmt_score(r['score'], r['max_score'])}) · #{r['id']}": int(r["id"]) for _, r in view.iterrows()}
                     sel = st.selectbox("수정/삭제할 성적", list(opts.keys()), key="sc_edit_sel")
-                    sid = opts[sel]
-                    row = sc_edit[sc_edit["id"] == sid].iloc[0]
-                    rtype = row["exam_type"]
-
-                    def num(v, default=None):
-                        return default if v is None or pd.isna(v) else float(v)
-
-                    def txt(v):
-                        return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
-
-                    with st.form(f"sc_edit_form_{sid}"):
-                        e1, e2 = st.columns([2, 1])
-                        ed_cat = e1.text_input("시험 이름", value=txt(row["category"]))
-                        try:
-                            cur_d = datetime.strptime(row["record_date"], "%Y-%m-%d").date()
-                        except (ValueError, TypeError):
-                            cur_d = today_kst()
-                        ed_date = e2.date_input("일자", cur_d)
-                        if rtype == "모의고사":
-                            a, b, c = st.columns(3)
-                            ed_r = a.number_input("독서", 0.0, 100.0, num(row["reading_score"], 0.0), 0.5)
-                            ed_l = b.number_input("문학", 0.0, 100.0, num(row["literature_score"], 0.0), 0.5)
-                            ed_g = c.number_input("문법·화법", 0.0, 100.0, num(row["grammar_score"], 0.0), 0.5)
-                            ed_score, ed_max = ed_r + ed_l + ed_g, 100.0
-                        else:
-                            a, b = st.columns(2)
-                            ed_score = a.number_input("점수" if rtype != "수업 테스트" else "맞은 개수", 0.0, 1000.0,
-                                                      num(row["score"], 0.0), 0.5)
-                            ed_max = b.number_input("만점" if rtype != "수업 테스트" else "전체 문항 수", 1.0, 1000.0,
-                                                    num(row["max_score"], 100.0), 1.0)
-                        g1, g2 = st.columns(2)
-                        ed_grade = g1.text_input("등급 / 성취도", value=txt(row["grade"]))
-                        ed_scope = g2.text_input("범위", value=txt(row["exam_scope"]))
-                        ed_wrong = st.text_input("틀린 문항", value=txt(row["wrong_questions"]))
-                        ed_fb = st.text_area("피드백 / 메모", value=txt(row["feedback"]), height=70)
-                        confirm_sc = st.checkbox("이 성적을 삭제합니다 (되돌릴 수 없음)")
-                        b1, b2 = st.columns(2)
-                        do_save = b1.form_submit_button("수정 저장", type="primary")
-                        do_del = b2.form_submit_button("삭제")
-                    if do_save:
-                        if ed_score > ed_max:
-                            st.warning("점수가 만점보다 커요.")
-                        else:
-                            params = {"cat": ed_cat.strip(), "d": str(ed_date), "sc": ed_score, "mx": ed_max,
-                                      "gr": ed_grade.strip(), "scope": ed_scope.strip(), "wq": ed_wrong.strip(),
-                                      "fb": ed_fb.strip(), "id": sid}
-                            extra = ""
-                            if rtype == "모의고사":
-                                extra = ", reading_score = :r, literature_score = :l, grammar_score = :g"
-                                params.update({"r": ed_r, "l": ed_l, "g": ed_g})
-                            with engine.begin() as conn:
-                                conn.execute(text(f"""
-                                    UPDATE scores SET category = :cat, record_date = :d, score = :sc, max_score = :mx,
-                                        grade = :gr, exam_scope = :scope, wrong_questions = :wq, feedback = :fb {extra}
-                                    WHERE id = :id
-                                """), params)
-                            ss.flash = f"✏️ {row['m_name']} · {ed_cat} 성적을 수정했어요."
-                            st.rerun()
-                    if do_del:
-                        if not confirm_sc:
-                            st.warning("삭제하려면 확인 칸을 먼저 체크해 주세요.")
-                        else:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM scores WHERE id = :id"), {"id": sid})
-                            ss.pop("sc_edit_sel", None)
-                            ss.flash = "🗑️ 성적을 삭제했어요."
-                            st.rerun()
+                    render_score_edit(sc_edit[sc_edit["id"] == opts[sel]].iloc[0], "panel")
 
         st.subheader("🕒 최근 입력한 성적")
         with engine.connect() as conn:
@@ -1657,7 +1692,7 @@ elif menu == MENU_SCORE:
                 SELECT COALESCE(s.exam_type, '모의고사') AS 종류, s.record_date AS 일자, m.name AS 이름,
                        s.category AS 시험, s.score, s.max_score, COALESCE(s.grade, '') AS 등급,
                        COALESCE(NULLIF(s.exam_scope, ''), s.quiz_format, '') AS "범위·유형",
-                       COALESCE(s.wrong_questions, '') AS 오답, s.member_id
+                       COALESCE(s.wrong_questions, '') AS 오답, s.member_id, s.id
                 FROM scores s JOIN members m ON s.member_id = m.id
                 ORDER BY s.id DESC LIMIT 15
             """, conn)
@@ -1665,8 +1700,17 @@ elif menu == MENU_SCORE:
             st.caption("아직 입력한 성적이 없습니다.")
         else:
             recent_sc.insert(4, "점수", [fmt_score(a, b) for a, b in zip(recent_sc["score"], recent_sc["max_score"])])
-            student_table(recent_sc.drop(columns=["score", "max_score", "member_id"]).fillna(""),
-                          recent_sc["member_id"].tolist(), recent_sc["이름"].tolist(), "score_recent_tbl")
+            ev_sc = student_table(recent_sc.drop(columns=["score", "max_score", "member_id", "id"]).fillna(""),
+                                  recent_sc["member_id"].tolist(), recent_sc["이름"].tolist(), "score_recent_tbl",
+                                  hint="👆 맨 왼쪽 네모 칸을 누르면 바로 아래에서 고칠 수 있고, 학생 페이지로도 갈 수 있어요.")
+            # [수정 32] 표에서 고른 성적을 바로 아래에서 수정
+            if ev_sc.selection.rows and ev_sc.selection.rows[0] < len(recent_sc):
+                pick_id = int(recent_sc.iloc[ev_sc.selection.rows[0]]["id"])
+                pick = load_score_rows("WHERE s.id = :id", {"id": pick_id}, 1)
+                if not pick.empty:
+                    with st.container(border=True):
+                        st.markdown(f"**✏️ 이 성적 바로 고치기** · {pick.iloc[0]['m_name']} · {sv(pick.iloc[0]['category'])}")
+                        render_score_edit(pick.iloc[0], "inline")
 
 # 4. 상담/소통 일지 [수정 30] — 대상(학생/학부모)·방법·다시 연락할 날
 elif menu == MENU_LOG:
@@ -1739,81 +1783,98 @@ elif menu == MENU_LOG:
                 if "lg_msg" in ss:
                     st.warning(ss.pop("lg_msg"))
 
-        with col_lg_edit:
-            with st.expander("✏️/🗑️ 등록된 상담 수정 및 삭제", expanded=False):
-                with engine.connect() as conn:
-                    logs_for_edit = pd.read_sql_query("""
-                        SELECT l.id, l.log_date, l.topic, l.details, l.target, l.method,
-                               l.followup_date, l.followup_note, l.followup_done, m.name, m.group_name
-                        FROM logs l
-                        JOIN members m ON l.member_id = m.id
-                        ORDER BY l.id DESC LIMIT 50
-                    """, conn)
+        def load_log_rows(where_sql="", params=None, limit=100):
+            with engine.connect() as conn:
+                return pd.read_sql_query(text(f"""
+                    SELECT l.id, l.log_date, l.topic, l.details, l.target, l.method,
+                           l.followup_date, l.followup_note, l.followup_done, m.name, m.group_name
+                    FROM logs l JOIN members m ON l.member_id = m.id
+                    {where_sql}
+                    ORDER BY l.log_date DESC, l.id DESC LIMIT {int(limit)}
+                """), conn, params=params or {})
 
+        def render_log_edit(target_lg, kp):
+            """[수정 32] 상담 기록 하나를 고치는 칸 — 위 '수정·삭제' 칸과 아래 표 선택에서 같이 씀"""
+            lid = int(target_lg["id"])
+            with st.form(f"{kp}_log_edit_form_{lid}"):
+                try:
+                    curr_lg_dt = datetime.strptime(target_lg['log_date'], "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    curr_lg_dt = today_kst()
+                try:
+                    curr_fu = datetime.strptime(sv(target_lg['followup_date']), "%Y-%m-%d").date()
+                except (ValueError, TypeError):
+                    curr_fu = None
+                cur_who = sv(target_lg["target"])
+                cur_how = sv(target_lg["method"])
+                e1, e2, e3 = st.columns([1, 1.3, 1])
+                ed_log_date = e1.date_input("상담 일자", curr_lg_dt)
+                ed_who = e2.radio("대상", LOG_TARGETS, horizontal=True,
+                                  index=LOG_TARGETS.index(cur_who) if cur_who in LOG_TARGETS else 0)
+                if not cur_who:
+                    e2.caption("예전 기록이라 대상이 비어 있었어요. 맞게 고르고 저장해 주세요.")
+                ed_how = e3.selectbox("방법", LOG_METHODS,
+                                      index=LOG_METHODS.index(cur_how) if cur_how in LOG_METHODS else 0)
+                ed_topic = st.text_input("상담 주제", value=sv(target_lg['topic']))
+                ed_details = st.text_area("상세 내용", value=sv(target_lg['details']))
+                g1, g2 = st.columns([1, 2])
+                ed_fu = g1.date_input("다시 연락할 날", value=curr_fu)
+                ed_funote = g2.text_input("다시 연락할 내용", value=sv(target_lg['followup_note']))
+                done_val = target_lg["followup_done"]
+                ed_done = st.checkbox("다시 연락 완료", value=bool(done_val) if not pd.isna(done_val) else False)
+
+                # [수정 6] 삭제는 체크해야만 실행
+                confirm_lg_del = st.checkbox("이 상담 일지를 삭제합니다 (되돌릴 수 없음)")
+
+                btn_l1, btn_l2 = st.columns(2)
+                save_lg = btn_l1.form_submit_button("수정 저장", type="primary")
+                del_lg = btn_l2.form_submit_button("일지 삭제")
+
+            if save_lg:
+                if not ed_topic.strip():
+                    st.warning("주제는 비워 둘 수 없어요.")
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text("""
+                            UPDATE logs SET log_date = :dt, topic = :tp, details = :dtl, target = :tg, method = :mt,
+                                followup_date = :fu, followup_note = :fn, followup_done = :fd
+                            WHERE id = :id
+                        """), {"dt": str(ed_log_date), "tp": ed_topic.strip(), "dtl": ed_details, "tg": ed_who,
+                               "mt": ed_how, "fu": str(ed_fu) if ed_fu else None, "fn": ed_funote.strip(),
+                               "fd": bool(ed_done), "id": lid})
+                    ss.flash = f"✏️ {target_lg['name']} 상담 일지를 수정했어요."
+                    st.rerun()
+            if del_lg:
+                if not confirm_lg_del:
+                    st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text("DELETE FROM logs WHERE id = :id"), {"id": lid})
+                    ss.pop("lg_edit_sel", None)
+                    ss.pop("log_recent_tbl", None)
+                    ss.flash = "🗑️ 상담 일지를 삭제했어요."
+                    st.rerun()
+
+        with col_lg_edit:
+            with st.expander("✏️/🗑️ 상담 기록 찾아서 수정·삭제", expanded=False):
+                logs_for_edit = load_log_rows()
                 if logs_for_edit.empty:
                     st.info("수정할 상담 일지가 없습니다.")
                 else:
-                    log_options = {
-                        f"[{row['log_date']}] {row['name']} - {row['topic']} (ID:{row['id']})": int(row['id'])
-                        for _, row in logs_for_edit.iterrows()
-                    }
-                    selected_lg_label = st.selectbox("수정/삭제할 일지 선택", list(log_options.keys()), key="lg_edit_sel")
-                    selected_lg_id = log_options[selected_lg_label]
-                    target_lg = logs_for_edit[logs_for_edit['id'] == selected_lg_id].iloc[0]
-
-                    with st.form(f"log_edit_form_{selected_lg_id}"):
-                        try:
-                            curr_lg_dt = datetime.strptime(target_lg['log_date'], "%Y-%m-%d").date()
-                        except (ValueError, TypeError):
-                            curr_lg_dt = today_kst()
-                        try:
-                            curr_fu = datetime.strptime(sv(target_lg['followup_date']), "%Y-%m-%d").date()
-                        except (ValueError, TypeError):
-                            curr_fu = None
-                        cur_who = sv(target_lg["target"])
-                        cur_how = sv(target_lg["method"])
-                        e1, e2, e3 = st.columns([1, 1.3, 1])
-                        ed_log_date = e1.date_input("상담 일자", curr_lg_dt)
-                        ed_who = e2.radio("대상", LOG_TARGETS, horizontal=True,
-                                          index=LOG_TARGETS.index(cur_who) if cur_who in LOG_TARGETS else 0)
-                        if not cur_who:
-                            e2.caption("예전 기록이라 대상이 비어 있었어요. 맞게 고르고 저장해 주세요.")
-                        ed_how = e3.selectbox("방법", LOG_METHODS,
-                                              index=LOG_METHODS.index(cur_how) if cur_how in LOG_METHODS else 0)
-                        ed_topic = st.text_input("상담 주제", value=sv(target_lg['topic']))
-                        ed_details = st.text_area("상세 내용", value=sv(target_lg['details']))
-                        g1, g2 = st.columns([1, 2])
-                        ed_fu = g1.date_input("다시 연락할 날", value=curr_fu)
-                        ed_funote = g2.text_input("다시 연락할 내용", value=sv(target_lg['followup_note']))
-                        ed_done = st.checkbox("다시 연락 완료", value=bool(target_lg["followup_done"]) if not pd.isna(target_lg["followup_done"]) else False)
-
-                        # [수정 6] 삭제는 체크해야만 실행
-                        confirm_lg_del = st.checkbox("이 상담 일지를 삭제합니다 (되돌릴 수 없음)")
-
-                        btn_l1, btn_l2 = st.columns(2)
-                        save_lg = btn_l1.form_submit_button("수정 저장", type="primary")
-                        del_lg = btn_l2.form_submit_button("일지 삭제")
-
-                    if save_lg:
-                        with engine.begin() as conn:
-                            conn.execute(text("""
-                                UPDATE logs SET log_date = :dt, topic = :tp, details = :dtl, target = :tg, method = :mt,
-                                    followup_date = :fu, followup_note = :fn, followup_done = :fd
-                                WHERE id = :id
-                            """), {"dt": str(ed_log_date), "tp": ed_topic.strip(), "dtl": ed_details, "tg": ed_who,
-                                   "mt": ed_how, "fu": str(ed_fu) if ed_fu else None, "fn": ed_funote.strip(),
-                                   "fd": bool(ed_done), "id": selected_lg_id})
-                        ss.flash = "✏️ 상담 일지를 수정했어요."
-                        st.rerun()
-                    if del_lg:
-                        if not confirm_lg_del:
-                            st.warning("삭제하려면 위의 확인 칸을 먼저 체크해 주세요.")
-                        else:
-                            with engine.begin() as conn:
-                                conn.execute(text("DELETE FROM logs WHERE id = :id"), {"id": selected_lg_id})
-                            ss.pop("lg_edit_sel", None)
-                            ss.flash = "🗑️ 상담 일지를 삭제했어요."
-                            st.rerun()
+                    lg_kw = st.text_input("학생 이름 / 주제 검색", key="lg_edit_kw")
+                    view_lg = logs_for_edit
+                    if lg_kw.strip():
+                        view_lg = view_lg[view_lg["name"].str.contains(lg_kw.strip(), na=False) |
+                                          view_lg["topic"].str.contains(lg_kw.strip(), na=False)]
+                    if view_lg.empty:
+                        st.caption("조건에 맞는 기록이 없어요.")
+                    else:
+                        log_options = {
+                            f"[{row['log_date']}] {row['name']} - {sv(row['topic'])} (ID:{row['id']})": int(row['id'])
+                            for _, row in view_lg.iterrows()
+                        }
+                        selected_lg_label = st.selectbox("수정/삭제할 일지 선택", list(log_options.keys()), key="lg_edit_sel")
+                        render_log_edit(logs_for_edit[logs_for_edit['id'] == log_options[selected_lg_label]].iloc[0], "panel")
 
         st.divider()
         st.subheader("🕒 최근 상담 기록")
@@ -1824,14 +1885,23 @@ elif menu == MENU_LOG:
                        CASE WHEN l.followup_date IS NULL THEN ''
                             WHEN l.followup_done THEN '✅ ' || substr(l.followup_date, 6)
                             ELSE '📞 ' || substr(l.followup_date, 6) END AS "다시 연락",
-                       l.details AS 상세내용, l.member_id
+                       l.details AS 상세내용, l.member_id, l.id
                 FROM logs l
                 JOIN members m ON l.member_id = m.id
                 ORDER BY l.log_date DESC, l.id DESC LIMIT 15
             """, conn)
         if not recent_lg.empty:
-            student_table(recent_lg.drop(columns=["member_id"]).fillna(""), recent_lg["member_id"].tolist(),
-                          recent_lg["이름"].tolist(), "log_recent_tbl")
+            ev_lg = student_table(recent_lg.drop(columns=["member_id", "id"]).fillna(""), recent_lg["member_id"].tolist(),
+                                  recent_lg["이름"].tolist(), "log_recent_tbl",
+                                  hint="👆 맨 왼쪽 네모 칸을 누르면 바로 아래에서 고칠 수 있고, 학생 페이지로도 갈 수 있어요.")
+            # [수정 32] 표에서 고른 기록을 바로 아래에서 수정
+            if ev_lg.selection.rows and ev_lg.selection.rows[0] < len(recent_lg):
+                pick_id = int(recent_lg.iloc[ev_lg.selection.rows[0]]["id"])
+                pick = load_log_rows("WHERE l.id = :id", {"id": pick_id}, 1)
+                if not pick.empty:
+                    with st.container(border=True):
+                        st.markdown(f"**✏️ 이 기록 바로 고치기** · {pick.iloc[0]['name']} · {sv(pick.iloc[0]['topic'])}")
+                        render_log_edit(pick.iloc[0], "inline")
         else:
             st.caption("아직 상담 기록이 없어요.")
 
