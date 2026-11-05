@@ -898,7 +898,41 @@ elif menu == MENU_MEMBERS:
     with engine.connect() as conn:
         all_cls = pd.read_sql_query("SELECT id, name, active FROM classes ORDER BY active DESC, name", conn)
     cls_name_of = {int(r["id"]): r["name"] + ("" if r["active"] else " (운영 종료)") for _, r in all_cls.iterrows()}
-    active_cls_ids = [int(i) for i in all_cls[all_cls["active"]]["id"]]
+    act_names = list(all_cls[all_cls["active"]]["name"])
+    all_names = list(all_cls["name"])
+    inactive_names = set(all_cls[~all_cls["active"]]["name"])
+
+    def cls_label(n):
+        return n + (" (운영 종료)" if n in inactive_names else "")
+
+    def _norm(n):
+        return "".join(str(n).split()).lower()
+
+    def resolve_classes(conn, names):
+        """[수정 36] 고른 반 이름 → 반 번호. 목록에 없는 새 이름이면 그 자리에서 반을 새로 만듦"""
+        existing = pd.read_sql_query(text("SELECT id, name FROM classes"), conn)
+        by_norm = {_norm(n): int(i) for i, n in zip(existing["id"], existing["name"])}
+        ids, created = [], []
+        for n in names:
+            n = str(n).strip()
+            if not n:
+                continue
+            if _norm(n) in by_norm:
+                ids.append(by_norm[_norm(n)])
+            else:
+                new_cid = conn.execute(text(
+                    "INSERT INTO classes (name, grade, notes, active) VALUES (:n, '', '', TRUE) RETURNING id"
+                ), {"n": n}).scalar()
+                by_norm[_norm(n)] = int(new_cid)
+                ids.append(int(new_cid))
+                created.append(n)
+        return ids, created
+
+    def created_note(created):
+        if not created:
+            return ""
+        return (" · 새 반 " + ", ".join(f"'{c}'" for c in created) + "도 만들었어요."
+                " 수업 시간은 '반·시간표 관리 → ② 수업 시간'에서 넣어 주세요.")
 
     def set_member_classes(conn, member_id, class_ids):
         conn.execute(text("DELETE FROM class_members WHERE member_id = :m"), {"m": int(member_id)})
@@ -933,15 +967,18 @@ elif menu == MENU_MEMBERS:
                    "pc": st.session_state.get("new_parent", "").strip(),
                    "pr": "" if st.session_state.get("new_parent_rel", "-") == "-" else st.session_state.get("new_parent_rel")}).scalar()
             picked_cls = st.session_state.get("new_classes", [])
+            created = []
             if picked_cls:
-                set_member_classes(conn, new_id, picked_cls)
+                ids_, created = resolve_classes(conn, picked_cls)
+                set_member_classes(conn, new_id, ids_)
         for k in ["new_name", "new_group", "new_contact", "new_notes", "new_parent"]:
             st.session_state[k] = ""
         st.session_state["new_parent_rel"] = "-"
         st.session_state["new_classes"] = []
         st.session_state["new_dup_ok"] = False
-        cls_txt = ", ".join(cls_name_of.get(c, "") for c in picked_cls)
-        st.session_state["flash"] = f"✅ '{nm}' 학생을 등록했어요." + (f" (수강 반: {cls_txt})" if cls_txt else "")
+        cls_txt = ", ".join(str(c) for c in picked_cls)
+        st.session_state["flash"] = (f"✅ '{nm}' 학생을 등록했어요." + (f" (수강 반: {cls_txt})" if cls_txt else "")
+                                     + created_note(created))
 
     with col_add:
         with st.expander("➕ 새 학생 등록", expanded=False):
@@ -949,8 +986,10 @@ elif menu == MENU_MEMBERS:
                 st.text_input("학생 이름 *", key="new_name")
                 st.text_input("소속 학교·학년", placeholder="평택고1, 한광중3", key="new_group",
                               help="다니는 학교와 학년이에요. 학원 반은 아래 '수강 반'에서 골라요.")
-                st.multiselect("수강 반 (선택, 여러 개 가능)", active_cls_ids, format_func=lambda i: cls_name_of[i],
-                               key="new_classes", placeholder="반을 고르세요")
+                st.multiselect("수강 반 (선택, 여러 개 가능)", act_names, key="new_classes",
+                               accept_new_options=True, select_all=False,
+                               placeholder="반을 고르거나, 새 반 이름을 입력하고 Enter",
+                               help="목록에 없는 반은 이름을 입력하고 Enter를 누르면, 등록할 때 새 반이 함께 만들어져요.")
                 st.text_input("학생 연락처", placeholder="010-0000-0000", key="new_contact")
                 p1, p2 = st.columns([2, 1])
                 p1.text_input("학부모 연락처", placeholder="010-0000-0000", key="new_parent")
@@ -977,16 +1016,18 @@ elif menu == MENU_MEMBERS:
                 with engine.connect() as conn:
                     curr_info = pd.read_sql_query(text("SELECT * FROM members WHERE id = :id"), conn, params={"id": target_edit_id}).iloc[0]
 
-                    cur_cls = [int(i) for i in pd.read_sql_query(
-                        text("SELECT class_id FROM class_members WHERE member_id = :m"), conn,
-                        params={"m": target_edit_id})["class_id"]]
+                    cur_cls_names = list(pd.read_sql_query(
+                        text("SELECT c.name FROM class_members cm JOIN classes c ON c.id = cm.class_id WHERE cm.member_id = :m"),
+                        conn, params={"m": target_edit_id})["name"])
 
                 with st.form("edit_member_form"):
                     edit_name = st.text_input("학생 이름 *", value=curr_info['name'])
                     edit_group = st.text_input("소속 학교·학년", value=sv(curr_info['group_name']),
                                                placeholder="평택고1, 한광중3")
-                    edit_cls = st.multiselect("수강 반", list(cls_name_of.keys()), default=[c for c in cur_cls if c in cls_name_of],
-                                              format_func=lambda i: cls_name_of[i], placeholder="반을 고르세요")
+                    edit_cls = st.multiselect("수강 반", all_names, default=[c for c in cur_cls_names if c in all_names],
+                                              format_func=cls_label, accept_new_options=True, select_all=False,
+                                              placeholder="반을 고르거나, 새 반 이름을 입력하고 Enter",
+                                              help="목록에 없는 반은 이름을 입력하고 Enter를 누르면, 저장할 때 새 반이 함께 만들어져요.")
                     edit_contact = st.text_input("학생 연락처", value=sv(curr_info['contact']))
                     ep1, ep2 = st.columns([2, 1])
                     edit_parent = ep1.text_input("학부모 연락처", value=sv(curr_info['parent_contact']))
@@ -1006,8 +1047,10 @@ elif menu == MENU_MEMBERS:
                                 WHERE id = :id
                             """), {"name": edit_name, "group_name": edit_group, "contact": edit_contact, "notes": edit_notes,
                                    "pc": edit_parent.strip(), "pr": "" if edit_rel == "-" else edit_rel, "id": target_edit_id})
-                            set_member_classes(conn, target_edit_id, edit_cls)
-                        st.session_state["flash"] = "✅ " + f"'{edit_name}' 학생 정보가 수정되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
+                            ids_, created_e = resolve_classes(conn, edit_cls)
+                            set_member_classes(conn, target_edit_id, ids_)
+                        st.session_state["flash"] = ("✅ " + f"'{edit_name}' 학생 정보가 수정되었습니다."  # [수정 31] 화면을 새로 그린 뒤에도 보이는 알림
+                                                     + created_note(created_e))
                         st.rerun()
 
     with col_del:
