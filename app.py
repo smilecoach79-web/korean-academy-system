@@ -483,6 +483,51 @@ section[data-testid="stSidebar"] [role="radiogroup"] p {
 }
 /* 원래 있던 얇은 밑줄은 숨김 */
 [data-baseweb="tab-highlight"], [data-baseweb="tab-border"] { display: none; }
+
+/* [수정 35] 화면을 바꾸는 라디오(시험 종류, 이번 주/다음 주, 보강/휴강)도 탭처럼 볼록한 버튼으로
+   (값을 입력하는 라디오는 일부러 그대로 둠) */
+.st-key-exam_type_sel [role="radiogroup"], .st-key-tt_week [role="radiogroup"], .st-key-ev_kind [role="radiogroup"] {
+    gap: 10px !important; flex-wrap: wrap; padding: 4px 2px 8px 2px;
+}
+.st-key-exam_type_sel label[data-testid="stRadioOption"], .st-key-exam_type_sel label[data-baseweb="radio"],
+.st-key-tt_week label[data-testid="stRadioOption"], .st-key-tt_week label[data-baseweb="radio"],
+.st-key-ev_kind label[data-testid="stRadioOption"], .st-key-ev_kind label[data-baseweb="radio"] {
+    margin: 0 !important;
+    padding: 9px 20px !important;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #ffffff 0%, #eef0f4 100%);
+    border: 1px solid #d5d9e0;
+    box-shadow: 0 4px 0 #c3c8d1, 0 6px 10px rgba(0, 0, 0, 0.08);
+    transition: transform 0.08s, box-shadow 0.08s;
+    cursor: pointer;
+}
+/* 동그라미 숨기기 */
+.st-key-exam_type_sel label[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]), .st-key-tt_week label[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]), .st-key-ev_kind label[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]),
+.st-key-exam_type_sel label[data-baseweb="radio"] > div:first-child, .st-key-tt_week label[data-baseweb="radio"] > div:first-child, .st-key-ev_kind label[data-baseweb="radio"] > div:first-child { display: none; }
+.st-key-exam_type_sel label[data-testid="stRadioOption"] p, .st-key-exam_type_sel label[data-baseweb="radio"] p,
+.st-key-tt_week label[data-testid="stRadioOption"] p, .st-key-tt_week label[data-baseweb="radio"] p,
+.st-key-ev_kind label[data-testid="stRadioOption"] p, .st-key-ev_kind label[data-baseweb="radio"] p { font-size: 1.05rem !important; font-weight: 600; color: #31333f; }
+.st-key-exam_type_sel label[data-testid="stRadioOption"]:hover, .st-key-exam_type_sel label[data-baseweb="radio"]:hover,
+.st-key-tt_week label[data-testid="stRadioOption"]:hover, .st-key-tt_week label[data-baseweb="radio"]:hover,
+.st-key-ev_kind label[data-testid="stRadioOption"]:hover, .st-key-ev_kind label[data-baseweb="radio"]:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 5px 0 #c3c8d1, 0 8px 14px rgba(0, 0, 0, 0.12);
+}
+.st-key-exam_type_sel label[data-testid="stRadioOption"][data-selected="true"], .st-key-exam_type_sel label[data-testid="stRadioOption"]:has(input:checked), .st-key-exam_type_sel label[data-baseweb="radio"]:has(input:checked),
+.st-key-tt_week label[data-testid="stRadioOption"][data-selected="true"], .st-key-tt_week label[data-testid="stRadioOption"]:has(input:checked), .st-key-tt_week label[data-baseweb="radio"]:has(input:checked),
+.st-key-ev_kind label[data-testid="stRadioOption"][data-selected="true"], .st-key-ev_kind label[data-testid="stRadioOption"]:has(input:checked), .st-key-ev_kind label[data-baseweb="radio"]:has(input:checked) {
+    background: linear-gradient(180deg, #ff6b6b 0%, #e63c3c 100%);
+    border-color: #c92f2f;
+    transform: translateY(3px);
+    box-shadow: 0 1px 0 #a82424, inset 0 2px 4px rgba(0, 0, 0, 0.25);
+}
+.st-key-exam_type_sel label[data-testid="stRadioOption"][data-selected="true"] p, .st-key-exam_type_sel label[data-testid="stRadioOption"]:has(input:checked) p, .st-key-exam_type_sel label[data-baseweb="radio"]:has(input:checked) p,
+.st-key-tt_week label[data-testid="stRadioOption"][data-selected="true"] p, .st-key-tt_week label[data-testid="stRadioOption"]:has(input:checked) p, .st-key-tt_week label[data-baseweb="radio"]:has(input:checked) p,
+.st-key-ev_kind label[data-testid="stRadioOption"][data-selected="true"] p, .st-key-ev_kind label[data-testid="stRadioOption"]:has(input:checked) p, .st-key-ev_kind label[data-baseweb="radio"]:has(input:checked) p {
+    color: #ffffff; font-weight: 700;
+}
+/* '시험 종류' 같은 제목 글씨도 조금 크고 굵게 */
+.st-key-exam_type_sel [data-testid="stWidgetLabel"] p, .st-key-tt_week [data-testid="stWidgetLabel"] p, .st-key-ev_kind [data-testid="stWidgetLabel"] p { font-size: 1rem; font-weight: 700; }
 [data-testid="stTabs"] [role="tab"]::after, [data-testid="stTabs"] [role="tab"]::before,
 [data-testid="stTabs"] [role="tablist"]::after, [data-testid="stTabs"] [role="tablist"]::before { display: none !important; }
 </style>
