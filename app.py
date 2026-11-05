@@ -439,6 +439,52 @@ section[data-testid="stSidebar"] label[data-baseweb="radio"]:has(input:checked) 
 section[data-testid="stSidebar"] [role="radiogroup"] p {
     font-size: 1.02rem;
 }
+
+/* [수정 34] 탭(①②③, 시험 종류 등)도 사이드바 메뉴처럼 볼록한 버튼으로
+   (신버전 Streamlit: [data-testid="stTab"], 구버전: [data-baseweb="tab-list"] button) */
+[data-testid="stTabs"] [role="tablist"], [data-baseweb="tab-list"] {
+    gap: 10px !important;
+    padding: 6px 2px 12px 2px !important;
+    flex-wrap: wrap;
+    border-bottom: none !important;
+    box-shadow: none !important;
+}
+[data-testid="stTabs"] [role="tab"], [data-baseweb="tab-list"] button[role="tab"] {
+    height: auto !important;
+    padding: 9px 20px !important;
+    border-radius: 12px !important;
+    background: linear-gradient(180deg, #ffffff 0%, #eef0f4 100%) !important;
+    border: 1px solid #d5d9e0 !important;
+    box-shadow: 0 4px 0 #c3c8d1, 0 6px 10px rgba(0, 0, 0, 0.08) !important;
+    transition: transform 0.08s, box-shadow 0.08s;
+    cursor: pointer;
+}
+[data-testid="stTabs"] [role="tab"] p, [data-baseweb="tab-list"] button[role="tab"] p {
+    font-size: 1.05rem !important;
+    font-weight: 600 !important;
+    color: #31333f !important;
+}
+[data-testid="stTabs"] [role="tab"]:hover, [data-baseweb="tab-list"] button[role="tab"]:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 5px 0 #c3c8d1, 0 8px 14px rgba(0, 0, 0, 0.12) !important;
+}
+/* 지금 열린 탭: 눌린 채로 빨갛게 */
+[data-testid="stTabs"] [role="tab"][aria-selected="true"],
+[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] {
+    background: linear-gradient(180deg, #ff6b6b 0%, #e63c3c 100%) !important;
+    border-color: #c92f2f !important;
+    transform: translateY(3px);
+    box-shadow: 0 1px 0 #a82424, inset 0 2px 4px rgba(0, 0, 0, 0.25) !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p,
+[data-baseweb="tab-list"] button[role="tab"][aria-selected="true"] p {
+    color: #ffffff !important;
+    font-weight: 700 !important;
+}
+/* 원래 있던 얇은 밑줄은 숨김 */
+[data-baseweb="tab-highlight"], [data-baseweb="tab-border"] { display: none; }
+[data-testid="stTabs"] [role="tab"]::after, [data-testid="stTabs"] [role="tab"]::before,
+[data-testid="stTabs"] [role="tablist"]::after, [data-testid="stTabs"] [role="tablist"]::before { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
