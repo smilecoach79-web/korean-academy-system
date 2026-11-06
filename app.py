@@ -648,6 +648,10 @@ with st.sidebar:
 if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"))
 
+# [수정 41] 다른 메뉴로 옮겨 가면 '학생 화면으로 돌아가기'는 잊음
+if st.session_state.get("back_to_student") and st.session_state["back_to_student"][0] != st.session_state.get("menu"):
+    st.session_state.pop("back_to_student", None)
+
 
 # 오늘 수업 카드의 '출결 입력' 버튼: 출결 메뉴로 이동하면서 그 반을 미리 선택 [수정 13]
 def go_class_attendance(class_name):
@@ -675,20 +679,33 @@ def go_class_event(class_name):
     st.session_state["ev_open"] = True
 
 
-def go_log_for(label):
+def go_log_for(label, member_id=None, name=None):
     """[수정 28] 학생이 미리 선택된 상담 입력 화면으로"""
     st.session_state["menu"] = MENU_LOG
     st.session_state["log_add_target"] = label
+    if member_id is not None:   # [수정 41] 학생 화면에서 왔으면 돌아갈 길 기억
+        st.session_state["back_to_student"] = (MENU_LOG, int(member_id), name)
 
 
-def go_score_for(label):
+def go_score_for(label, member_id=None, name=None):
     """[수정 28] 학생이 미리 선택된 성적 입력 화면으로"""
     st.session_state["menu"] = MENU_SCORE
     for k in ["mk_stu", "ns_stu", "et_stu"]:
         st.session_state[k] = label
+    if member_id is not None:
+        st.session_state["back_to_student"] = (MENU_SCORE, int(member_id), name)
+
+
+def back_to_student_link():
+    """[수정 41] 학생 화면에서 넘어왔을 때만 맨 위에 작게 뜨는 '돌아가기'"""
+    bk = st.session_state.get("back_to_student")
+    if bk and bk[0] == st.session_state.get("menu"):
+        st.button(f"← {bk[2]} 학생 화면으로 돌아가기", key="back_to_stu_btn", type="tertiary",
+                  on_click=go_student, args=(bk[1],))
 
 
 def go_student(member_id):
+    st.session_state.pop("back_to_student", None)
     st.session_state["menu"] = MENU_PORTFOLIO
     st.session_state["pf_target_id"] = int(member_id)
 
@@ -1588,6 +1605,7 @@ elif menu == MENU_ATT:
 
 # 3. 성적 입력 — 시험 종류별 [수정 21]
 elif menu == MENU_SCORE:
+    back_to_student_link()
     st.header("📝 성적 및 국어 평가")
     with engine.connect() as conn:
         members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
@@ -1979,6 +1997,7 @@ elif menu == MENU_SCORE:
 
 # 4. 상담/소통 일지 [수정 30] — 대상(학생/학부모)·방법·다시 연락할 날
 elif menu == MENU_LOG:
+    back_to_student_link()
     st.header("💬 상담 · 소통 일지")
     ss = st.session_state
     with engine.connect() as conn:
@@ -2244,8 +2263,8 @@ elif menu == MENU_PORTFOLIO:
                 if sv(m_info["status"], "재원") != "퇴원":
                     stu_label = f"[{sv(m_info['group_name'], '소속 없음')}] {m_info['name']} (ID:{m_info['id']})"
                     q1, q2, _q = st.columns([1, 1, 2])
-                    q1.button("✏️ 상담 기록하기", key="pf_go_log", on_click=go_log_for, args=(stu_label,), width="stretch")
-                    q2.button("📝 성적 입력하기", key="pf_go_score", on_click=go_score_for, args=(stu_label,), width="stretch")
+                    q1.button("✏️ 상담 기록하기", key="pf_go_log", on_click=go_log_for, args=(stu_label, int(selected_id), m_info["name"]), width="stretch")
+                    q2.button("📝 성적 입력하기", key="pf_go_score", on_click=go_score_for, args=(stu_label, int(selected_id), m_info["name"]), width="stretch")
                 else:
                     st.caption("퇴원한 학생이에요. 다시 수업을 들으면 '구성원 등록/목록'에서 재원으로 복원해 주세요.")
                 if my_classes.empty:
