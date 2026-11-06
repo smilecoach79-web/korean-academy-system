@@ -1735,14 +1735,14 @@ elif menu == MENU_SCORE:
                      "ns_score": None, "ns_obj": None, "ns_essay": None, "et_score": None}.items():
             ss.setdefault(k, v)
 
-        st.markdown(f"#### {EXAM_ICONS[exam_type]} {exam_type} 성적 입력")
+        st.markdown(f"#### {EXAM_ICONS[exam_type]} {exam_type} 기록")
 
         if exam_type == "모의고사":
             with st.form("form_mock"):
                 c1, c2 = st.columns([2, 1])
                 c1.selectbox("학생 선택", list(member_dict.keys()), key="mk_stu")
                 c2.date_input("시험 일자", today_kst(), key="mk_date")
-                st.text_input("시험 이름 *", placeholder="11월 전국연합학력평가", key="mk_cat")
+                st.text_input("시험 이름 *", placeholder="시험 이름을 적어 주세요. (시행 월, 주관 기관 등)", key="mk_cat")
                 a, b, c = st.columns(3)
                 a.number_input("독서", min_value=0.0, max_value=100.0, step=0.5, key="mk_r")
                 b.number_input("문학", min_value=0.0, max_value=100.0, step=0.5, key="mk_l")
@@ -1762,7 +1762,7 @@ elif menu == MENU_SCORE:
                 c2.date_input("시험 일자", today_kst(), key="ns_date")
                 t1, t2 = st.columns(2)
                 t1.selectbox("시험", SCHOOL_TERMS, index=3, key="ns_term")
-                t2.text_input("과목", placeholder="공통국어2 / 문학 / 독서와 작문", key="ns_subject")
+                t2.text_input("과목", placeholder="과목 이름", key="ns_subject")
                 st.text_area("시험 범위", placeholder="시험 범위를 적어 주세요. (단원, 작품, 학습지 등)", key="ns_scope", height=68)
                 s1, s2, s3, s4 = st.columns(4)
                 s1.number_input("점수 *", min_value=0.0, max_value=200.0, step=0.5, key="ns_score")
@@ -1795,7 +1795,7 @@ elif menu == MENU_SCORE:
                 q_date = k2.date_input("테스트 날짜", today_kst(), key="qz_date")
                 q_cid = q_opts[q_cname]
                 m1, m2, m3 = st.columns([2, 1, 1])
-                q_name = m1.text_input("테스트 이름 / 범위 *", placeholder="관동별곡 어휘 OX", key="qz_name").strip()
+                q_name = m1.text_input("테스트 이름 / 범위 *", placeholder="테스트 이름이나 범위를 적어 주세요.", key="qz_name").strip()
                 q_fmt = m2.selectbox("유형", QUIZ_FORMATS, key="qz_fmt")
                 q_total = m3.number_input("전체 문항 수", min_value=1, max_value=200, value=10, step=1, key="qz_total")
 
@@ -1872,7 +1872,7 @@ elif menu == MENU_SCORE:
                 c1, c2 = st.columns([2, 1])
                 c1.selectbox("학생 선택", list(member_dict.keys()), key="et_stu")
                 c2.date_input("시험 일자", today_kst(), key="et_date")
-                st.text_input("시험 이름 *", placeholder="사설 모의고사 3회 / 단원평가", key="et_cat")
+                st.text_input("시험 이름 *", placeholder="시험 이름을 적어 주세요.", key="et_cat")
                 st.text_input("범위 (선택)", key="et_scope")
                 s1, s2 = st.columns(2)
                 s1.number_input("점수 *", min_value=0.0, max_value=1000.0, step=0.5, key="et_score")
@@ -2701,7 +2701,7 @@ elif menu == MENU_CLASS:
         with c_new:
             st.markdown("##### ➕ 새 반 만들기")
             with st.form("class_new_form", clear_on_submit=True):
-                new_name = st.text_input("반 이름 *", placeholder="고1 평고학사 A반")
+                new_name = st.text_input("반 이름 *", placeholder="반 이름을 적어 주세요. (학년·학교·반 등)")
                 new_grade = st.text_input("학년", placeholder="고1")
                 new_notes = st.text_input("메모", placeholder="내신반, 교재명 등")
                 if st.form_submit_button("반 만들기", type="primary"):
