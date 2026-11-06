@@ -2279,7 +2279,7 @@ elif menu == MENU_PORTFOLIO:
                     stu_label = f"[{sv(m_info['group_name'], '소속 없음')}] {m_info['name']} (ID:{m_info['id']})"
                     q1, q2, _q = st.columns([1, 1, 2])
                     q1.button("✏️ 상담 기록하기", key="pf_go_log", on_click=go_log_for, args=(stu_label, int(selected_id), m_info["name"]), width="stretch")
-                    q2.button("📝 성적 입력하기", key="pf_go_score", on_click=go_score_for, args=(stu_label, int(selected_id), m_info["name"]), width="stretch")
+                    q2.button("📝 시험 기록하기", key="pf_go_score", on_click=go_score_for, args=(stu_label, int(selected_id), m_info["name"]), width="stretch")
                 else:
                     st.caption("퇴원한 학생이에요. 다시 수업을 들으면 '구성원 등록/목록'에서 재원으로 복원해 주세요.")
                 if my_classes.empty:
@@ -2911,7 +2911,8 @@ elif menu == MENU_CLASSVIEW:
         # ---- 이 반에서 바로 할 일 ----
         a1, a2, a3 = st.columns(3)
         a1.button("📅 출결·수업 기록 →", key="cv_go_att", on_click=go_class_attendance, args=(cv_name, int(cv_id)), width="stretch")
-        a2.button("✏️ 수업 테스트 입력 →", key="cv_go_quiz", on_click=go_class_quiz, args=(cv_name, int(cv_id)), width="stretch")
+        a2.button("📝 시험 기록 →", key="cv_go_quiz", on_click=go_class_quiz, args=(cv_name, int(cv_id)), width="stretch",
+                  help="수업 테스트 칸이 이 반으로 맞춰진 채 열려요. 모의고사·내신·기타로 바꿔 기록해도 돼요.")
         a3.button("🔁 보강·휴강 잡기 →", key="cv_go_ev", on_click=go_class_event, args=(cv_name, int(cv_id)), width="stretch")
 
         # ---- 한눈에 보는 숫자 ----
