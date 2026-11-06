@@ -165,7 +165,7 @@ WEEKDAYS = "월화수목금토일"
 EXAM_TYPES = ["모의고사", "학교 내신", "수업 테스트", "기타"]
 EXAM_ICONS = {"모의고사": "📊", "학교 내신": "🏫", "수업 테스트": "✏️", "기타": "📁"}
 EXAM_HELP = {
-    "모의고사": "독서·문학·문법(선택과목) 점수와 등급·백분위를 기록해요.",
+    "모의고사": "독서와 작문·문학·화법과 언어 점수와 등급·백분위를 기록해요.",
     "학교 내신": "중간·기말고사 점수와 시험 범위, 객관식·서술형, 등급·성취도를 기록해요.",
     "수업 테스트": "OX·빈칸·단답 테스트를 반 학생 전체 표로 한 번에 입력해요. 맞은 개수만 적으면 정답률이 자동 계산돼요.",
     "기타": "사설 모의고사, 단원평가 등 점수와 만점만 기록해요.",
@@ -343,6 +343,25 @@ def mark_no_class(class_id, d_str, kind, event_id, name):
             """), {"c": int(class_id), "d": d_str})
     dd = datetime.strptime(d_str, "%Y-%m-%d").date()
     st.session_state["flash"] = f"🚫 {dd.month}/{dd.day} {name} 수업 없었음으로 처리했어요."
+
+
+def mock_total(r, l, g, total):
+    """[수정 49] 모의고사 총점 정하기 — 과목 점수는 아는 것만, 모르면 빈칸
+    돌려주는 값: (총점, 문제 있을 때 안내 문구)"""
+    filled = [x for x in (r, l, g) if x is not None]
+    if total is None:
+        if len(filled) == 3:
+            return sum(filled), ""
+        if not filled:
+            return None, "총점이나 과목 점수를 입력해 주세요."
+        return None, "과목 점수를 다 모르면 총점을 적어 주세요. (아는 과목만 적고 총점은 따로)"
+    if filled and sum(filled) > total:
+        return None, f"적은 과목 점수 합계({sum(filled):g}점)가 총점({total:g}점)보다 커요."
+    if len(filled) == 3 and abs(sum(filled) - total) > 0.01:
+        return None, f"세 과목 합계({sum(filled):g}점)와 총점({total:g}점)이 달라요. 총점을 비우면 합계로 저장돼요."
+    if total == 0:
+        return None, "총점이 0점이에요. 점수를 입력했는지 확인해 주세요."
+    return total, ""
 
 
 def fmt_score(score, max_score):
@@ -1019,8 +1038,8 @@ if menu == MENU_TODAY:
                         st.caption(f"정답률 {float(rs['score']) / float(rs['max_score']) * 100:.0f}%"
                                    + (f" · 유형 {rs['quiz_format']}" if _v(rs['quiz_format']) else ""))
                     if rs["종류"] == "모의고사" and _v(rs["reading_score"]):
-                        st.caption(f"독서 {float(rs['reading_score']):g} · 문학 {float(rs['literature_score'] or 0):g} · "
-                                   f"문법·화법 {float(rs['grammar_score'] or 0):g}")
+                        st.caption(f"독서와 작문 {float(rs['reading_score']):g} · 문학 {float(rs['literature_score'] or 0):g} · "
+                                   f"화법과 언어 {float(rs['grammar_score'] or 0):g}")
                     if _v(rs["school_avg"]):
                         st.caption(f"학교 평균 {float(rs['school_avg']):g}")
                     if _v(rs["exam_scope"]):
@@ -1664,25 +1683,27 @@ elif menu == MENU_SCORE:
         # ---------- ① 모의고사 ----------
         def cb_mock():
             cat = ss.mk_cat.strip()
-            total = (ss.mk_r or 0) + (ss.mk_l or 0) + (ss.mk_g or 0)
+            # [수정 49] 아는 과목만 적고, 모르는 과목은 빈칸('-')으로
+            r_, l_, g_ = ss.get("mk_r"), ss.get("mk_l"), ss.get("mk_g")
             mid = member_dict[ss.mk_stu]
             if not cat:
-                ss.sc_msg = "시험 이름을 입력해 주세요. (예: 11월 전국연합학력평가)"
+                ss.sc_msg = "시험 이름을 입력해 주세요."
                 return
-            if total == 0:
-                ss.sc_msg = "영역별 점수가 모두 0점이에요. 점수를 입력했는지 확인해 주세요."
+            total, err = mock_total(r_, l_, g_, ss.get("mk_total"))
+            if err:
+                ss.sc_msg = err
                 return
             if already_saved(mid, ss.mk_date, cat, "모의고사"):
                 ss.sc_msg = "이 학생의 같은 날짜·같은 시험 성적이 이미 있어요. 고치려면 아래 '저장된 성적 수정·삭제'를 이용하세요."
                 return
             insert_score(dict(member_id=mid, record_date=str(ss.mk_date), category=cat, score=total,
-                              feedback=ss.mk_fb.strip(), reading_score=ss.mk_r, literature_score=ss.mk_l,
-                              grammar_score=ss.mk_g, wrong_questions=ss.mk_wrong.strip(), exam_type="모의고사",
+                              feedback=ss.mk_fb.strip(), reading_score=r_, literature_score=l_,
+                              grammar_score=g_, wrong_questions=ss.mk_wrong.strip(), exam_type="모의고사",
                               max_score=100.0, grade="" if ss.mk_grade == "-" else ss.mk_grade,
                               percentile=ss.mk_pct))
             ss.flash = f"📊 {ss.mk_stu.split('] ')[-1].split(' (ID')[0]} · {cat} {total:g}점 저장했어요."
             # 시험 이름·날짜는 남겨 두고 점수 칸만 비워서, 다음 학생을 바로 입력할 수 있게
-            reset({"mk_r": 0.0, "mk_l": 0.0, "mk_g": 0.0, "mk_grade": "-", "mk_pct": None, "mk_wrong": "", "mk_fb": ""})
+            reset({"mk_r": None, "mk_l": None, "mk_g": None, "mk_total": None, "mk_grade": "-", "mk_pct": None, "mk_wrong": "", "mk_fb": ""})
 
         # ---------- ② 학교 내신 ----------
         def cb_school():
@@ -1743,16 +1764,22 @@ elif menu == MENU_SCORE:
                 c1.selectbox("학생 선택", list(member_dict.keys()), key="mk_stu")
                 c2.date_input("시험 일자", today_kst(), key="mk_date")
                 st.text_input("시험 이름 *", placeholder="시험 이름을 적어 주세요. (시행 월, 주관 기관 등)", key="mk_cat")
-                a, b, c = st.columns(3)
-                a.number_input("독서", min_value=0.0, max_value=100.0, step=0.5, key="mk_r")
-                b.number_input("문학", min_value=0.0, max_value=100.0, step=0.5, key="mk_l")
-                c.number_input("문법·화법 (선택과목)", min_value=0.0, max_value=100.0, step=0.5, key="mk_g")
+                a, b, c, d = st.columns(4)
+                a.number_input("독서와 작문", min_value=0.0, max_value=100.0, value=None, step=0.5, key="mk_r",
+                               placeholder="모르면 비워 두기")
+                b.number_input("문학", min_value=0.0, max_value=100.0, value=None, step=0.5, key="mk_l",
+                               placeholder="모르면 비워 두기")
+                c.number_input("화법과 언어", min_value=0.0, max_value=100.0, value=None, step=0.5, key="mk_g",
+                               placeholder="모르면 비워 두기")
+                d.number_input("총점", min_value=0.0, max_value=100.0, value=None, step=0.5, key="mk_total",
+                               placeholder="비우면 세 과목 합계",
+                               help="세 과목을 다 적으면 비워 둬도 돼요. 과목 점수를 일부만 알면 총점을 꼭 적어 주세요.")
                 e1, e2 = st.columns(2)
                 e1.selectbox("등급", ["-"] + [f"{i}등급" for i in range(1, 10)], key="mk_grade")
                 e2.number_input("백분위 (선택)", min_value=0.0, max_value=100.0, step=1.0, key="mk_pct")
                 st.text_input("틀린 문항 번호 / 취약 제재", key="mk_wrong")
                 st.text_area("피드백 및 처방", key="mk_fb", height=80)
-                st.caption("총점은 세 영역을 더해 저장돼요. 저장하면 시험 이름·날짜는 남고 점수 칸만 비워져서 다음 학생을 바로 입력할 수 있어요.")
+                st.caption("아는 점수만 적으면 돼요. 모르는 과목은 '-'로 남아요. 저장하면 시험 이름·날짜는 남고 점수 칸만 비워져서 다음 학생을 바로 입력할 수 있어요.")
                 st.form_submit_button("💾 모의고사 성적 저장", type="primary", on_click=cb_mock)
 
         elif exam_type == "학교 내신":
@@ -1913,11 +1940,13 @@ elif menu == MENU_SCORE:
                     cur_d = today_kst()
                 ed_date = e2.date_input("일자", cur_d)
                 if rtype == "모의고사":
-                    a, b, c = st.columns(3)
-                    ed_r = a.number_input("독서", 0.0, 100.0, num(row["reading_score"], 0.0), 0.5)
-                    ed_l = b.number_input("문학", 0.0, 100.0, num(row["literature_score"], 0.0), 0.5)
-                    ed_g = c.number_input("문법·화법", 0.0, 100.0, num(row["grammar_score"], 0.0), 0.5)
-                    ed_score, ed_max = ed_r + ed_l + ed_g, 100.0
+                    # [수정 49] 나중에 알게 된 과목 점수를 채워 넣을 수 있게: 모르는 칸은 비워 둠
+                    a, b, c, d = st.columns(4)
+                    ed_r = a.number_input("독서와 작문", 0.0, 100.0, num(row["reading_score"]), 0.5, placeholder="모름")
+                    ed_l = b.number_input("문학", 0.0, 100.0, num(row["literature_score"]), 0.5, placeholder="모름")
+                    ed_g = c.number_input("화법과 언어", 0.0, 100.0, num(row["grammar_score"]), 0.5, placeholder="모름")
+                    ed_tot_in = d.number_input("총점", 0.0, 100.0, num(row["score"]), 0.5, placeholder="비우면 합계")
+                    ed_score, ed_max = None, 100.0
                 else:
                     a, b = st.columns(2)
                     ed_score = a.number_input("점수" if rtype != "수업 테스트" else "맞은 개수", 0.0, 1000.0,
@@ -1933,8 +1962,13 @@ elif menu == MENU_SCORE:
                 b1, b2 = st.columns(2)
                 do_save = b1.form_submit_button("수정 저장", type="primary")
                 do_del = b2.form_submit_button("삭제")
+            mk_err = ""
+            if do_save and rtype == "모의고사":
+                ed_score, mk_err = mock_total(ed_r, ed_l, ed_g, ed_tot_in)
             if do_save:
-                if ed_score > ed_max:
+                if mk_err:
+                    st.warning(mk_err)
+                elif ed_score > ed_max:
                     st.warning("점수가 만점보다 커요.")
                 else:
                     params = {"cat": ed_cat.strip(), "d": str(ed_date), "sc": ed_score, "mx": ed_max,
@@ -2380,14 +2414,15 @@ elif menu == MENU_PORTFOLIO:
                         "점수": [fmt_score(a, b) for a, b in zip(det["score"], det["max_score"])],
                         "등급": det["grade"],
                         "범위·유형": det["exam_scope"].where(det["exam_scope"].fillna("") != "", det["quiz_format"]),
-                        "독서": det["reading_score"],
+                        "독서와 작문": det["reading_score"],
                         "문학": det["literature_score"],
-                        "문법·화법": det["grammar_score"],
+                        "화법과 언어": det["grammar_score"],
                         "틀린 문항": det["wrong_questions"],
                         "피드백": det["feedback"],
                     })
-                    for col in ["독서", "문학", "문법·화법"]:
-                        det_view[col] = [("" if v is None or pd.isna(v) else f"{float(v):g}") for v in det_view[col]]
+                    for col in ["독서와 작문", "문학", "화법과 언어"]:
+                        det_view[col] = [(("-" if t_ == "모의고사" else "") if v is None or pd.isna(v) else f"{float(v):g}")
+                                         for v, t_ in zip(det_view[col], det_view["종류"])]
                     st.dataframe(det_view.fillna("").astype(str), hide_index=True, width="stretch")
                 else:
                     st.caption("등록된 성적이 없습니다.")
@@ -3026,7 +3061,7 @@ elif menu == MENU_BACKUP:
                    s.score AS 점수, s.max_score AS 만점, s.grade AS 등급_성취도, s.percentile AS 백분위,
                    s.exam_scope AS 시험범위, s.quiz_format AS 테스트유형,
                    s.objective_score AS 객관식, s.essay_score AS 서술형, s.school_avg AS 학교평균,
-                   s.reading_score AS 독서점수, s.literature_score AS 문학점수, s.grammar_score AS 문법_화법점수,
+                   s.reading_score AS 독서와작문점수, s.literature_score AS 문학점수, s.grammar_score AS 화법과언어점수,
                    s.wrong_questions AS 주요오답문항, s.feedback AS 피드백
             FROM scores s
             JOIN members m ON s.member_id = m.id
