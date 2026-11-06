@@ -260,6 +260,91 @@ def load_sessions(start_d, end_d):
     return out.sort_values(["date", "start_time", "name"]).reset_index(drop=True)
 
 
+def find_missed_records(today, days=14):
+    """[수정 40] 최근 2주 지난 수업 중 출결·수업 내용·과제 검사가 빠진 날 찾기
+    - 오늘은 아직 수업 전일 수 있으니 어제까지만
+    - 반마다 '처음 기록한 날'부터만 봄 (프로그램을 쓰기 전 날짜까지 쏟아지지 않게)"""
+    start = today - timedelta(days=days)
+    end = today - timedelta(days=1)
+    if end < start:
+        return pd.DataFrame()
+    sess = load_sessions(start, end)
+    if sess.empty:
+        return pd.DataFrame()
+    sess = sess[~sess["canceled"].astype(bool)]
+    if sess.empty:
+        return pd.DataFrame()
+    with engine.connect() as conn:
+        first_rec = pd.read_sql_query("""
+            SELECT class_id, MIN(d) AS first_d FROM (
+                SELECT class_id, event_date AS d FROM attendance WHERE class_id IS NOT NULL
+                UNION ALL SELECT class_id, lesson_date AS d FROM lessons
+            ) x GROUP BY class_id
+        """, conn)
+        att = pd.read_sql_query(text("""
+            SELECT class_id, event_date, COUNT(*) AS n,
+                   SUM(CASE WHEN COALESCE(homework_status, '') <> '' THEN 1 ELSE 0 END) AS n_hw
+            FROM attendance WHERE class_id IS NOT NULL AND event_date BETWEEN :a AND :b
+            GROUP BY class_id, event_date
+        """), conn, params={"a": str(start), "b": str(end)})
+        les = pd.read_sql_query(text("""
+            SELECT class_id, lesson_date FROM lessons
+            WHERE lesson_date BETWEEN :a AND :b
+              AND (COALESCE(content, '') <> '' OR COALESCE(homework, '') <> '')
+        """), conn, params={"a": str(start), "b": str(end)})
+        due = pd.read_sql_query(text("""
+            SELECT class_id, due_date, homework FROM lessons
+            WHERE due_date BETWEEN :a AND :b AND COALESCE(homework, '') <> ''
+        """), conn, params={"a": str(start), "b": str(end)})
+        roster_n = pd.read_sql_query("""
+            SELECT cm.class_id, COUNT(*) AS n FROM class_members cm JOIN members m ON m.id = cm.member_id
+            WHERE m.status = '재원' OR m.status IS NULL GROUP BY cm.class_id
+        """, conn)
+    first_map = dict(zip(first_rec["class_id"], first_rec["first_d"]))
+    att_map = {(int(c), d): (int(n), int(h)) for c, d, n, h in zip(att["class_id"], att["event_date"], att["n"], att["n_hw"])}
+    les_set = {(int(c), d) for c, d in zip(les["class_id"], les["lesson_date"])}
+    due_map = {(int(c), d): hw for c, d, hw in zip(due["class_id"], due["due_date"], due["homework"])}
+    roster_map = dict(zip(roster_n["class_id"], roster_n["n"]))
+    rows = []
+    for r in sess.itertuples():
+        cid, d = int(r.class_id), r.date
+        fd = first_map.get(cid)
+        if not fd or d < fd:          # 이 반을 기록하기 시작한 날 이전은 건너뜀
+            continue
+        issues = []
+        if roster_map.get(cid, 0) > 0 and (cid, d) not in att_map:
+            issues.append("📅 출결")
+        if (cid, d) not in les_set:
+            issues.append("📖 수업 내용")
+        if (cid, d) in due_map and (cid, d) in att_map and att_map[(cid, d)][1] == 0:
+            issues.append("📝 과제 검사")
+        if issues:
+            rows.append(dict(date=d, class_id=cid, name=r.name, start_time=r.start_time, kind=r.kind,
+                             event_id=r.event_id, issues=issues, hw=due_map.get((cid, d), "")))
+    return pd.DataFrame(rows)
+
+
+def go_record_date(class_name, d_str):
+    """놓친 기록 → 그 반·그 날짜로 맞춰진 출결·수업 기록 화면"""
+    st.session_state["menu"] = MENU_ATT
+    st.session_state["bulk_class"] = class_name
+    st.session_state["bulk_date"] = datetime.strptime(d_str, "%Y-%m-%d").date()
+
+
+def mark_no_class(class_id, d_str, kind, event_id, name):
+    """'이 날 수업 없었음': 정규 수업이면 휴강으로 기록, 보강이면 보강 일정을 지움"""
+    with engine.begin() as conn:
+        if kind == "보강" and event_id:
+            conn.execute(text("DELETE FROM class_events WHERE id = :id"), {"id": int(event_id)})
+        else:
+            conn.execute(text("""
+                INSERT INTO class_events (class_id, event_date, kind, memo)
+                VALUES (:c, :d, '휴강', '놓친 기록에서 수업 없었음으로 처리')
+            """), {"c": int(class_id), "d": d_str})
+    dd = datetime.strptime(d_str, "%Y-%m-%d").date()
+    st.session_state["flash"] = f"🚫 {dd.month}/{dd.day} {name} 수업 없었음으로 처리했어요."
+
+
 def fmt_score(score, max_score):
     """84 / 100 처럼 점수 표시"""
     if score is None or pd.isna(score):
@@ -743,6 +828,27 @@ if menu == MENU_TODAY:
 
     with col_l:
         st.subheader("📚 오늘 수업")
+        # [수정 40] 놓친 기록: 있을 때만 작게 나타남
+        missed = find_missed_records(t)
+        if not missed.empty:
+            n_items = sum(len(x) for x in missed["issues"])
+            with st.expander(f"📋 놓친 기록 {len(missed)}일 · {n_items}건 (최근 2주) — 눌러서 확인", expanded=False):
+                st.caption("수업이 있었던 날 중 빠진 기록이에요. '기록하기'를 누르면 그 날짜로 바로 열려요.")
+                for mm in missed.itertuples():
+                    md_ = datetime.strptime(mm.date, "%Y-%m-%d").date()
+                    with st.container(border=True):
+                        st.markdown(md(f"**{md_.month}/{md_.day}({WEEKDAYS[md_.weekday()]}) {mm.start_time}　{mm.name}**"
+                                       + ("　`🔁 보강`" if mm.kind == "보강" else "")))
+                        st.caption("빠진 것: " + " · ".join(mm.issues)
+                                   + (md(f"　|　검사할 과제: {mm.hw}") if "📝 과제 검사" in mm.issues and mm.hw else ""))
+                        k1, k2, _k = st.columns([1, 1, 0.6])
+                        k1.button("기록하기 →", key=f"miss_go_{mm.class_id}_{mm.date}", type="primary",
+                                  on_click=go_record_date, args=(mm.name, mm.date), width="stretch")
+                        k2.button("🚫 수업 없었음", key=f"miss_no_{mm.class_id}_{mm.date}",
+                                  on_click=mark_no_class,
+                                  args=(mm.class_id, mm.date, mm.kind, mm.event_id, mm.name), width="stretch",
+                                  help="정규 수업이면 그날을 휴강으로, 보강이면 그 보강 일정을 지워요.")
+
         # [수정 27] 다가오는 일주일 보강·휴강 미리 알림
         if not upcoming.empty:
             lines = []
