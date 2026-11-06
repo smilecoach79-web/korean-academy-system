@@ -649,12 +649,13 @@ if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"))
 
 # [수정 41] 다른 메뉴로 옮겨 가면 '학생 화면으로 돌아가기'는 잊음
-if st.session_state.get("back_to_student") and st.session_state["back_to_student"][0] != st.session_state.get("menu"):
-    st.session_state.pop("back_to_student", None)
+if st.session_state.get("back_nav") and st.session_state["back_nav"][0] != st.session_state.get("menu"):
+    st.session_state.pop("back_nav", None)
 
 
 # 오늘 수업 카드의 '출결 입력' 버튼: 출결 메뉴로 이동하면서 그 반을 미리 선택 [수정 13]
-def go_class_attendance(class_name):
+def go_class_attendance(class_name, class_id=None):
+    remember_class_back(MENU_ATT, class_id, class_name)
     st.session_state["menu"] = MENU_ATT
     st.session_state["bulk_class"] = class_name
     st.session_state["bulk_date"] = today_kst()
@@ -663,17 +664,20 @@ def go_class_attendance(class_name):
 # [수정 23] 어디서든 학생을 누르면 그 학생의 개인별 종합 조회로 이동
 def go_class(class_id):
     """[수정 28] 반 페이지(반별 종합 조회)로 이동"""
+    st.session_state.pop("back_nav", None)
     st.session_state["menu"] = MENU_CLASSVIEW
     st.session_state["cv_target_id"] = int(class_id)
 
 
-def go_class_quiz(class_name):
+def go_class_quiz(class_name, class_id=None):
+    remember_class_back(MENU_SCORE, class_id, class_name)
     st.session_state["menu"] = MENU_SCORE
     st.session_state["exam_type_sel"] = "수업 테스트"
     st.session_state["qz_class"] = class_name
 
 
-def go_class_event(class_name):
+def go_class_event(class_name, class_id=None):
+    remember_class_back(MENU_TIMETABLE, class_id, class_name)
     st.session_state["menu"] = MENU_TIMETABLE
     st.session_state["ev_cls"] = class_name
     st.session_state["ev_open"] = True
@@ -684,7 +688,7 @@ def go_log_for(label, member_id=None, name=None):
     st.session_state["menu"] = MENU_LOG
     st.session_state["log_add_target"] = label
     if member_id is not None:   # [수정 41] 학생 화면에서 왔으면 돌아갈 길 기억
-        st.session_state["back_to_student"] = (MENU_LOG, int(member_id), name)
+        st.session_state["back_nav"] = (MENU_LOG, "student", int(member_id), name)
 
 
 def go_score_for(label, member_id=None, name=None):
@@ -693,19 +697,29 @@ def go_score_for(label, member_id=None, name=None):
     for k in ["mk_stu", "ns_stu", "et_stu"]:
         st.session_state[k] = label
     if member_id is not None:
-        st.session_state["back_to_student"] = (MENU_SCORE, int(member_id), name)
+        st.session_state["back_nav"] = (MENU_SCORE, "student", int(member_id), name)
 
 
-def back_to_student_link():
-    """[수정 41] 학생 화면에서 넘어왔을 때만 맨 위에 작게 뜨는 '돌아가기'"""
-    bk = st.session_state.get("back_to_student")
+def back_link():
+    """[수정 41·42] 학생·반 화면에서 넘어왔을 때만 맨 위에 작게 뜨는 '돌아가기'"""
+    bk = st.session_state.get("back_nav")
     if bk and bk[0] == st.session_state.get("menu"):
-        st.button(f"← {bk[2]} 학생 화면으로 돌아가기", key="back_to_stu_btn", type="tertiary",
-                  on_click=go_student, args=(bk[1],))
+        _menu, kind, tid, name = bk
+        if kind == "student":
+            st.button(f"← {name} 학생 화면으로 돌아가기", key="back_nav_btn", type="tertiary",
+                      on_click=go_student, args=(tid,))
+        else:
+            st.button(f"← {name} 화면으로 돌아가기", key="back_nav_btn", type="tertiary",
+                      on_click=go_class, args=(tid,))
+
+
+def remember_class_back(target_menu, class_id, class_name):
+    if class_id is not None:
+        st.session_state["back_nav"] = (target_menu, "class", int(class_id), class_name)
 
 
 def go_student(member_id):
-    st.session_state.pop("back_to_student", None)
+    st.session_state.pop("back_nav", None)
     st.session_state["menu"] = MENU_PORTFOLIO
     st.session_state["pf_target_id"] = int(member_id)
 
@@ -1285,6 +1299,7 @@ elif menu == MENU_MEMBERS:
 
 # 2. 출결 체크
 elif menu == MENU_ATT:
+    back_link()
     st.header("2. 출석 및 수업 참여 관리")
     with engine.connect() as conn:
         # [수정 4] 퇴원생은 입력 목록에서 제외
@@ -1605,7 +1620,7 @@ elif menu == MENU_ATT:
 
 # 3. 성적 입력 — 시험 종류별 [수정 21]
 elif menu == MENU_SCORE:
-    back_to_student_link()
+    back_link()
     st.header("📝 성적 및 국어 평가")
     with engine.connect() as conn:
         members = pd.read_sql_query(f"SELECT id, name, group_name FROM members {ACTIVE_ONLY} ORDER BY name ASC", conn)
@@ -1997,7 +2012,7 @@ elif menu == MENU_SCORE:
 
 # 4. 상담/소통 일지 [수정 30] — 대상(학생/학부모)·방법·다시 연락할 날
 elif menu == MENU_LOG:
-    back_to_student_link()
+    back_link()
     st.header("💬 상담 · 소통 일지")
     ss = st.session_state
     with engine.connect() as conn:
@@ -2394,6 +2409,7 @@ elif menu == MENU_PORTFOLIO:
 
 # 7. 내 시간표 [수정 15]
 elif menu == MENU_TIMETABLE:
+    back_link()
     st.header("🗓️ 내 시간표")
     t0 = today_kst()
     with engine.connect() as conn:
@@ -2894,9 +2910,9 @@ elif menu == MENU_CLASSVIEW:
 
         # ---- 이 반에서 바로 할 일 ----
         a1, a2, a3 = st.columns(3)
-        a1.button("📅 출결·수업 기록 →", key="cv_go_att", on_click=go_class_attendance, args=(cv_name,), width="stretch")
-        a2.button("✏️ 수업 테스트 입력 →", key="cv_go_quiz", on_click=go_class_quiz, args=(cv_name,), width="stretch")
-        a3.button("🔁 보강·휴강 잡기 →", key="cv_go_ev", on_click=go_class_event, args=(cv_name,), width="stretch")
+        a1.button("📅 출결·수업 기록 →", key="cv_go_att", on_click=go_class_attendance, args=(cv_name, int(cv_id)), width="stretch")
+        a2.button("✏️ 수업 테스트 입력 →", key="cv_go_quiz", on_click=go_class_quiz, args=(cv_name, int(cv_id)), width="stretch")
+        a3.button("🔁 보강·휴강 잡기 →", key="cv_go_ev", on_click=go_class_event, args=(cv_name, int(cv_id)), width="stretch")
 
         # ---- 한눈에 보는 숫자 ----
         stu_ids = set(cv_stu["id"])
