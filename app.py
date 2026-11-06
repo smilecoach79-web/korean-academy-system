@@ -1462,14 +1462,14 @@ elif menu == MENU_ATT:
 
             with st.form(f"lesson_form_{cid}_{bdate}"):
                 l_content = st.text_area("수업 내용", value=sv(c_val["content"]) if has_ls else "",
-                                         placeholder="고전시가 – 관동별곡(정철) 서사·본사1 해석, 화자의 여정과 정서 변화", height=90)
+                                         placeholder="오늘 수업한 내용을 적어 주세요. (작품·단원, 진도 등)", height=90)
                 l_hw = st.text_area("과제", value=sv(c_val["homework"]) if has_ls else "",
-                                    placeholder="관동별곡 기출 문제 풀어오기 (교재 p.45~52)", height=70)
+                                    placeholder="내준 과제를 적어 주세요. (교재 쪽수, 문제 범위 등)", height=70)
                 f1, f2 = st.columns([1, 2])
                 l_due = f1.date_input("과제 제출일", value=due_default,
                                       help="기본값은 이 반의 다음 수업 날짜예요. 과제가 없으면 비워 두세요.")
                 l_notes = f2.text_input("메모 (선택)", value=sv(c_val["notes"]) if has_ls else "",
-                                        placeholder="진도 덜 나감, 다음 시간 본사2부터")
+                                        placeholder="다음 시간에 기억할 것 (진도 상황 등)")
                 g1, g2 = st.columns([1, 1])
                 save_ls = g1.form_submit_button("📖 수업 기록 저장", type="primary", width="stretch")
                 del_ls = False
@@ -1763,7 +1763,7 @@ elif menu == MENU_SCORE:
                 t1, t2 = st.columns(2)
                 t1.selectbox("시험", SCHOOL_TERMS, index=3, key="ns_term")
                 t2.text_input("과목", placeholder="공통국어2 / 문학 / 독서와 작문", key="ns_subject")
-                st.text_area("시험 범위", placeholder="공통국어2 3단원 (관동별곡 ~ 사미인곡), 학습지 1~12", key="ns_scope", height=68)
+                st.text_area("시험 범위", placeholder="시험 범위를 적어 주세요. (단원, 작품, 학습지 등)", key="ns_scope", height=68)
                 s1, s2, s3, s4 = st.columns(4)
                 s1.number_input("점수 *", min_value=0.0, max_value=200.0, step=0.5, key="ns_score")
                 s2.number_input("만점", min_value=1.0, max_value=200.0, value=100.0, step=1.0, key="ns_max")
@@ -2072,12 +2072,12 @@ elif menu == MENU_LOG:
                     c1.date_input("상담 일자", today_kst(), key="lg_date")
                     c2.radio("대상", LOG_TARGETS, horizontal=True, key="lg_who")
                     c3.selectbox("방법", LOG_METHODS, key="lg_how")
-                    st.text_input("주제 *", placeholder="기말 대비 학습 상황 안내", key="lg_topic")
+                    st.text_input("주제 *", placeholder="상담 주제를 짧게 적어 주세요.", key="lg_topic")
                     st.text_area("상세 내용 및 다음 점검 과제", key="lg_details", height=110)
                     f1, f2 = st.columns([1, 2])
                     f1.date_input("다시 연락할 날 (선택)", key="lg_fu",
                                   help="정하면 그날 '오늘' 화면의 '연락할 일'에 떠요.")
-                    f2.text_input("다시 연락할 내용", placeholder="기말 성적 나오면 어머님께 재통화", key="lg_funote")
+                    f2.text_input("다시 연락할 내용", placeholder="다시 연락할 때 할 이야기", key="lg_funote")
                     st.form_submit_button("💾 일지 저장", type="primary", on_click=cb_log)
                 if "lg_msg" in ss:
                     st.warning(ss.pop("lg_msg"))
@@ -2447,14 +2447,14 @@ elif menu == MENU_TIMETABLE:
                 s1, s2 = st.columns(2)
                 ev_s = s1.time_input("시작", dtime(17, 30), step=300, key="ev_start")
                 ev_e = s2.time_input("종료", dtime(19, 0), step=300, key="ev_end")
-                ev_memo = st.text_input("메모 (선택)", placeholder="11/12 휴강분 보강, 내신 대비 특강 등", key="ev_memo_mk")
+                ev_memo = st.text_input("메모 (선택)", placeholder="보강 이유 등 (선택)", key="ev_memo_mk")
             else:
                 if reg_day.empty:
                     st.warning(f"{ev_label}에는 이 반의 정규 수업이 없어요. 날짜를 확인해 주세요.")
                 else:
                     st.caption(md(f"{ev_label} 정규 수업: " + ", ".join(f"{r.start_time}~{r.end_time}" for r in reg_day.itertuples())
                                   + " → 이 수업을 쉬는 것으로 표시돼요."))
-                ev_memo = st.text_input("메모 (선택)", placeholder="학교 행사, 시험 기간, 강사 일정 등", key="ev_memo_cx")
+                ev_memo = st.text_input("메모 (선택)", placeholder="휴강 이유 등 (선택)", key="ev_memo_cx")
 
             if st.button(f"💾 {ev_cname} {ev_label} {ev_kind} 저장", type="primary", key="ev_save"):
                 ds = str(ev_date)
