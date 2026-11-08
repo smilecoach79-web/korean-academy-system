@@ -2531,36 +2531,110 @@ elif menu == MENU_TIMETABLE:
                         st.session_state["flash"] = f"🚫 {ev_cname} {ev_label} 휴강으로 표시했어요."
                         st.rerun()
 
-            st.markdown("**다가오는 보강 · 휴강**")
+            # [수정 51] 지난 일주일 것도 보여서 잘못 잡은 일정을 고칠 수 있게
+            st.markdown("**최근 · 다가오는 보강 · 휴강**")
             with engine.connect() as conn:
                 ev_list = pd.read_sql_query(text("""
-                    SELECT e.id, e.event_date, e.kind, c.name, e.start_time, e.end_time, e.memo
+                    SELECT e.id, e.class_id, e.event_date, e.kind, c.name, e.start_time, e.end_time, e.memo,
+                           EXISTS (SELECT 1 FROM attendance a WHERE a.class_id = e.class_id
+                                   AND a.event_date = e.event_date) AS done
                     FROM class_events e JOIN classes c ON c.id = e.class_id
                     WHERE e.event_date >= :t ORDER BY e.event_date, e.start_time
-                """), conn, params={"t": str(t0)})
+                """), conn, params={"t": str(t0 - timedelta(days=7))})
             if ev_list.empty:
                 st.caption("잡혀 있는 보강·휴강이 없어요.")
             else:
                 def _dlabel(x):
                     d_ = datetime.strptime(x, "%Y-%m-%d").date()
                     return f"{d_.month}/{d_.day}({WEEKDAYS[d_.weekday()]})"
+
+                def _state(k, d, done):
+                    if k == "휴강":
+                        return "-"
+                    if bool(done):
+                        return "✅ 완료"
+                    return "⚠️ 기록 없음" if d < str(t0) else "예정"
                 ev_view = pd.DataFrame({
                     "날짜": [_dlabel(x) for x in ev_list["event_date"]],
                     "종류": ["🔁 보강" if k == "보강" else "🚫 휴강" for k in ev_list["kind"]],
                     "반": ev_list["name"],
                     "시간": [f"{sv(a)}~{sv(b)}" if sv(a) else "정규 시간" for a, b in zip(ev_list["start_time"], ev_list["end_time"])],
+                    "상태": [_state(k, d, dn) for k, d, dn in zip(ev_list["kind"], ev_list["event_date"], ev_list["done"])],
                     "메모": ev_list["memo"].fillna(""),
                 })
-                st.caption("👆 지우려면 맨 왼쪽 네모 칸을 누르세요.")
+                st.caption("👆 고치거나 취소하려면 맨 왼쪽 네모 칸을 누르세요. 보강은 그날 출결을 기록하면 '✅ 완료'가 돼요.")
                 ev_pick = st.dataframe(ev_view, hide_index=True, width="stretch",
                                        on_select="rerun", selection_mode="single-row", key="ev_tbl")
-                if ev_pick.selection.rows:
+                if ev_pick.selection.rows and ev_pick.selection.rows[0] < len(ev_list):
                     er = ev_list.iloc[ev_pick.selection.rows[0]]
-                    if st.button(f"🗑️ {_dlabel(er['event_date'])} {er['name']} {er['kind']} 일정 삭제", key="ev_del"):
-                        with engine.begin() as conn:
-                            conn.execute(text("DELETE FROM class_events WHERE id = :id"), {"id": int(er["id"])})
-                        st.session_state["flash"] = "🗑️ 일정을 지웠어요."
-                        st.rerun()
+                    eid, ekind, ecid = int(er["id"]), er["kind"], int(er["class_id"])
+                    cur_d = datetime.strptime(er["event_date"], "%Y-%m-%d").date()
+
+                    def _t(x, dflt):
+                        try:
+                            return datetime.strptime(sv(x), "%H:%M").time()
+                        except ValueError:
+                            return dflt
+                    with st.container(border=True):
+                        st.markdown(f"**✏️ {_dlabel(er['event_date'])} {er['name']} {ekind} 고치기 · 취소**")
+                        if bool(er["done"]):
+                            st.caption("이미 출결을 기록한 보강이에요. 일정을 고치거나 지워도 출결 기록은 그대로 남아요.")
+                        with st.form(f"ev_edit_form_{eid}"):
+                            f1, f2, f3 = st.columns([1.2, 1, 1])
+                            nd = f1.date_input("날짜", cur_d)
+                            if ekind == "보강":
+                                ns = f2.time_input("시작", _t(er["start_time"], dtime(17, 30)), step=300)
+                                ne = f3.time_input("종료", _t(er["end_time"], dtime(19, 0)), step=300)
+                            nm = st.text_input("메모", value=sv(er["memo"]))
+                            g1, g2 = st.columns(2)
+                            do_upd = g1.form_submit_button("💾 고친 내용 저장", type="primary")
+                            do_cxl = g2.form_submit_button(f"🗑️ 이 {ekind} 취소 (일정 지우기)")
+                        if do_cxl:
+                            with engine.begin() as conn:
+                                conn.execute(text("DELETE FROM class_events WHERE id = :id"), {"id": eid})
+                            st.session_state.pop("ev_tbl", None)
+                            st.session_state["ev_open"] = True
+                            st.session_state["flash"] = f"🗑️ {_dlabel(er['event_date'])} {er['name']} {ekind}을 취소했어요."
+                            st.rerun()
+                        if do_upd:
+                            nds = str(nd)
+                            nlabel = f"{nd.month}/{nd.day}({WEEKDAYS[nd.weekday()]})"
+                            err = ""
+                            if ekind == "보강":
+                                s_str, e_str = ns.strftime("%H:%M"), ne.strftime("%H:%M")
+                                day_sess = load_sessions(nd, nd)
+                                if not day_sess.empty:
+                                    day_sess = day_sess[~day_sess["canceled"].astype(bool)]
+                                    day_sess = day_sess[day_sess["event_id"].fillna(-1).astype(int) != eid]   # 자기 자신은 빼고
+                                    day_sess = day_sess[(day_sess["start_time"] < e_str) & (day_sess["end_time"] > s_str)]
+                                if e_str <= s_str:
+                                    err = "종료 시각이 시작 시각보다 늦어야 해요. (오후 7시는 19:00)"
+                                elif not day_sess.empty:
+                                    err = "같은 시간에 다른 수업이 있어요: " + ", ".join(
+                                        f"{c.start_time}~{c.end_time} {c.name}" for c in day_sess.itertuples())
+                            else:
+                                s_str = e_str = None
+                                if tt_sched[(tt_sched["class_id"] == ecid) & (tt_sched["weekday"] == nd.weekday())].empty:
+                                    err = f"{nlabel}에는 이 반의 정규 수업이 없어서 휴강으로 옮길 수 없어요."
+                                else:
+                                    with engine.connect() as conn:
+                                        dup = conn.execute(text("""SELECT 1 FROM class_events WHERE class_id = :c AND event_date = :d
+                                                                   AND kind = '휴강' AND id <> :id"""),
+                                                           {"c": ecid, "d": nds, "id": eid}).fetchone()
+                                    if dup:
+                                        err = f"{nlabel}은 이미 휴강으로 잡혀 있어요."
+                            if err:
+                                st.warning(err)
+                            else:
+                                with engine.begin() as conn:
+                                    conn.execute(text("""UPDATE class_events SET event_date = :d, start_time = :s,
+                                                         end_time = :e, memo = :m WHERE id = :id"""),
+                                                 {"d": nds, "s": s_str, "e": e_str, "m": nm.strip(), "id": eid})
+                                st.session_state.pop("ev_tbl", None)
+                                st.session_state["ev_open"] = True
+                                st.session_state["flash"] = (f"✏️ {er['name']} {ekind}을 {nlabel}"
+                                                             + (f" {s_str}~{e_str}" if s_str else "") + "로 고쳤어요.")
+                                st.rerun()
 
     # ---------- 주간 시간표 (실제 날짜 기준) ----------
     # [수정 28] 반 페이지 바로가기
@@ -2608,7 +2682,7 @@ elif menu == MENU_TIMETABLE:
         cap_col.caption(
             f"{monday.month}/{monday.day} ~ {sunday.month}/{sunday.day} · 수업 {len(live)}회 · 총 {total_min // 60}시간 {total_min % 60}분"
             + (f" · 🔁 보강 {n_mk}" if n_mk else "") + (f" · 🚫 휴강 {n_cx}" if n_cx else "")
-            + " · 카드에 마우스를 올리면 학생 이름이 보여요")
+            + " · ✅ 출결을 기록한 수업 · 카드에 마우스를 올리면 학생 이름이 보여요")
         show_names = tog_col.toggle("학생 이름 펼쳐 보기", key="tt_show_names",
                                     help="휴대폰처럼 마우스가 없을 때 켜 두면 카드에 이름이 바로 보여요.")
 
@@ -2644,19 +2718,34 @@ elif menu == MENU_TIMETABLE:
         #   - 평일(월~금): 이번 주 평일 수업의 시작 시간마다 한 줄 → 시간대별 높이가 맞음
         #   - 주말(토·일): 시작 시간이 달라서 위에서부터 차례로 쌓음
         #   - 휴대폰처럼 좁은 화면에서는 요일별로 위아래로 이어서 보여 줌
+        with engine.connect() as conn:
+            # [수정 51] 출결을 기록한 수업 = 한 수업
+            done_df = pd.read_sql_query(text("""
+                SELECT DISTINCT class_id, event_date FROM attendance
+                WHERE class_id IS NOT NULL AND event_date BETWEEN :a AND :b
+            """), conn, params={"a": str(monday), "b": str(sunday)})
+        done_set = {(int(c), d) for c, d in zip(done_df["class_id"], done_df["event_date"])}
+
         def tt_card_html(r, is_today):
             stu = names_map.get(r.class_id, [])
+            done = (not r.canceled) and (int(r.class_id), r.date) in done_set
             stu_txt = ", ".join(html.escape(n) for n in stu) if stu else "배정된 학생이 없어요"
             memo_html = f"<br>📝 {html.escape(r.memo)}" if r.memo else ""
             if r.canceled:
                 border, bg, tag = "#c3c8d1", "#f4f5f8", "<span class='tt-tag' style='background:#e3e6ee;color:#5f6475'>🚫 휴강</span><br>"
                 name_html = f"<span style='text-decoration:line-through;color:#8b93a7'>{html.escape(r.name)}</span>"
+            elif r.kind == "보강" and done:
+                border, bg, tag = "#2e9e5b", "#f2fbf5", "<span class='tt-tag' style='background:#d6f2e0;color:#1d6b3c'>✅ 보강 완료</span><br>"
+                name_html = html.escape(r.name)
             elif r.kind == "보강":
-                border, bg, tag = "#f2a33a", "#fffaf2", "<span class='tt-tag' style='background:#fde9c8;color:#8a4b00'>🔁 보강</span><br>"
+                border, bg = "#f2a33a", "#fffaf2"
+                tag = ("<span class='tt-tag' style='background:#fde9c8;color:#8a4b00'>"
+                       + ("🔁 보강 예정" if r.date >= str(t0) else "⚠️ 보강 · 기록 없음") + "</span><br>")
                 name_html = html.escape(r.name)
             else:
                 border, bg, tag = ("#ff4b4b" if is_today else "#8b93a7"), "#ffffff", ""
                 name_html = html.escape(r.name)
+            done_txt = " · <span style='color:#2e9e5b;font-weight:700'>✅ 기록함</span>" if done else ""
             # 이름을 펼쳐 둔 상태면 카드 안에, 아니면 마우스를 올렸을 때 말풍선으로
             names_block = (f"<div class='tt-names'>{stu_txt}{memo_html}</div>" if show_names else
                            f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}{memo_html}</div>")
@@ -2664,7 +2753,7 @@ elif menu == MENU_TIMETABLE:
                     f"padding:8px 10px;background:{bg};box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
                     f"{tag}<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
                     f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{name_html}</div>"
-                    f"<div style='font-size:0.78rem;color:#808495'>학생 {len(stu)}명</div>{names_block}</div>")
+                    f"<div style='font-size:0.78rem;color:#808495'>학생 {len(stu)}명{done_txt}</div>{names_block}</div>")
 
         wk_dates = {str(monday + timedelta(days=i)) for i in range(5)}
         slots = sorted({sv(x) for x in sess[sess["date"].isin(wk_dates)]["start_time"]})
