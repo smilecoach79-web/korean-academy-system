@@ -2640,45 +2640,74 @@ elif menu == MENU_TIMETABLE:
         </style>
         """, unsafe_allow_html=True)
 
-        cols = st.columns(7)
+        # [수정 50] 평일은 같은 시작 시간끼리 같은 줄에 오도록 한 장의 격자로 그림
+        #   - 평일(월~금): 이번 주 평일 수업의 시작 시간마다 한 줄 → 시간대별 높이가 맞음
+        #   - 주말(토·일): 시작 시간이 달라서 위에서부터 차례로 쌓음
+        #   - 휴대폰처럼 좁은 화면에서는 요일별로 위아래로 이어서 보여 줌
+        def tt_card_html(r, is_today):
+            stu = names_map.get(r.class_id, [])
+            stu_txt = ", ".join(html.escape(n) for n in stu) if stu else "배정된 학생이 없어요"
+            memo_html = f"<br>📝 {html.escape(r.memo)}" if r.memo else ""
+            if r.canceled:
+                border, bg, tag = "#c3c8d1", "#f4f5f8", "<span class='tt-tag' style='background:#e3e6ee;color:#5f6475'>🚫 휴강</span><br>"
+                name_html = f"<span style='text-decoration:line-through;color:#8b93a7'>{html.escape(r.name)}</span>"
+            elif r.kind == "보강":
+                border, bg, tag = "#f2a33a", "#fffaf2", "<span class='tt-tag' style='background:#fde9c8;color:#8a4b00'>🔁 보강</span><br>"
+                name_html = html.escape(r.name)
+            else:
+                border, bg, tag = ("#ff4b4b" if is_today else "#8b93a7"), "#ffffff", ""
+                name_html = html.escape(r.name)
+            # 이름을 펼쳐 둔 상태면 카드 안에, 아니면 마우스를 올렸을 때 말풍선으로
+            names_block = (f"<div class='tt-names'>{stu_txt}{memo_html}</div>" if show_names else
+                           f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}{memo_html}</div>")
+            return (f"<div class='tt-card' tabindex='0' style='border:1px solid #d5d9e0;border-left:5px solid {border};border-radius:8px;"
+                    f"padding:8px 10px;background:{bg};box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
+                    f"{tag}<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
+                    f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{name_html}</div>"
+                    f"<div style='font-size:0.78rem;color:#808495'>학생 {len(stu)}명</div>{names_block}</div>")
+
+        wk_dates = {str(monday + timedelta(days=i)) for i in range(5)}
+        slots = sorted({sv(x) for x in sess[sess["date"].isin(wk_dates)]["start_time"]})
+        slot_row = {t_: k + 2 for k, t_ in enumerate(slots)}       # 1줄째는 요일 머리
+        n_rows = max(len(slots), 1)
+        cells = []
         for i in range(7):
             d = monday + timedelta(days=i)
-            with cols[i]:
-                is_today = d == t0
-                head_bg = "#ff4b4b" if is_today else "#e8eaf0"
-                head_fg = "#ffffff" if is_today else "#31333f"
-                st.markdown(
-                    f"<div style='text-align:center;padding:6px 0;border-radius:10px;background:{head_bg};"
-                    f"color:{head_fg};font-weight:700;margin-bottom:8px;line-height:1.3'>{WEEKDAYS[i]}{' · 오늘' if is_today else ''}"
-                    f"<div style='font-size:0.75rem;font-weight:500;opacity:0.85'>{d.month}/{d.day}</div></div>",
-                    unsafe_allow_html=True)
-                day = sess[sess["date"] == str(d)]
-                if day.empty:
-                    st.markdown("<div style='text-align:center;color:#a3a8b8;font-size:0.85rem;padding:12px 0'>수업 없음</div>",
-                                unsafe_allow_html=True)
-                for r in day.itertuples():
-                    stu = names_map.get(r.class_id, [])
-                    stu_txt = ", ".join(html.escape(n) for n in stu) if stu else "배정된 학생이 없어요"
-                    memo_html = f"<br>📝 {html.escape(r.memo)}" if r.memo else ""
-                    if r.canceled:
-                        border, bg, tag = "#c3c8d1", "#f4f5f8", "<span class='tt-tag' style='background:#e3e6ee;color:#5f6475'>🚫 휴강</span><br>"
-                        name_html = f"<span style='text-decoration:line-through;color:#8b93a7'>{html.escape(r.name)}</span>"
-                    elif r.kind == "보강":
-                        border, bg, tag = "#f2a33a", "#fffaf2", "<span class='tt-tag' style='background:#fde9c8;color:#8a4b00'>🔁 보강</span><br>"
-                        name_html = html.escape(r.name)
-                    else:
-                        border, bg, tag = ("#ff4b4b" if is_today else "#8b93a7"), "#ffffff", ""
-                        name_html = html.escape(r.name)
-                    # 이름을 펼쳐 둔 상태면 카드 안에, 아니면 마우스를 올렸을 때 말풍선으로
-                    names_block = (f"<div class='tt-names'>{stu_txt}{memo_html}</div>" if show_names else
-                                   f"<div class='tt-pop'><b>{html.escape(r.name)}</b> · {len(stu)}명<br>{stu_txt}{memo_html}</div>")
-                    st.markdown(
-                        f"<div class='tt-card' tabindex='0' style='border:1px solid #d5d9e0;border-left:5px solid {border};border-radius:8px;"
-                        f"padding:8px 10px;margin-bottom:8px;background:{bg};box-shadow:0 2px 4px rgba(0,0,0,0.06)'>"
-                        f"{tag}<div style='font-size:0.8rem;color:#5f6475'>{r.start_time}~{r.end_time}</div>"
-                        f"<div style='font-weight:700;font-size:0.92rem;line-height:1.35;margin:2px 0;word-break:keep-all'>{name_html}</div>"
-                        f"<div style='font-size:0.78rem;color:#808495'>학생 {len(stu)}명</div>{names_block}</div>",
-                        unsafe_allow_html=True)
+            is_today = d == t0
+            head_bg = "#ff4b4b" if is_today else "#e8eaf0"
+            head_fg = "#ffffff" if is_today else "#31333f"
+            cells.append(
+                f"<div class='tt-head' style='grid-column:{i + 1};grid-row:1;background:{head_bg};color:{head_fg}'>"
+                f"{WEEKDAYS[i]}{' · 오늘' if is_today else ''}"
+                f"<div style='font-size:0.75rem;font-weight:500;opacity:0.85'>{d.month}/{d.day}</div></div>")
+            day = sess[sess["date"] == str(d)]
+            if day.empty:
+                cells.append(f"<div class='tt-cell tt-empty' style='grid-column:{i + 1};grid-row:2'>수업 없음</div>")
+            elif i < 5:
+                for t_, grp in day.groupby(day["start_time"].map(sv), sort=True):
+                    cells.append(f"<div class='tt-cell tt-row' style='grid-column:{i + 1};grid-row:{slot_row[t_]}'>"
+                                 + "".join(tt_card_html(r, is_today) for r in grp.itertuples()) + "</div>")
+            else:
+                cells.append(f"<div class='tt-cell tt-stack' style='grid-column:{i + 1};grid-row:2 / span {n_rows}'>"
+                             + "".join(tt_card_html(r, is_today) for r in day.itertuples()) + "</div>")
+        st.markdown("""
+        <style>
+        .tt-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); column-gap: 14px; row-gap: 8px;
+                   align-items: stretch; }
+        .tt-head { text-align: center; padding: 6px 0; border-radius: 10px; font-weight: 700; line-height: 1.3; }
+        .tt-cell { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+        .tt-row .tt-card { flex: 1; }          /* 같은 줄 카드는 높이도 맞춤 */
+        .tt-stack, .tt-empty { align-self: start; }
+        .tt-empty { text-align: center; color: #a3a8b8; font-size: 0.85rem; padding: 12px 0; }
+        .tt-card:hover, .tt-card:focus { z-index: 1000; }
+        @media (max-width: 640px) {
+            .tt-grid { grid-template-columns: 1fr; }
+            .tt-grid > div { grid-column: auto !important; grid-row: auto !important; }
+            .tt-head { margin-top: 10px; }
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        st.markdown("<div class='tt-grid'>" + "".join(cells) + "</div>", unsafe_allow_html=True)
 
 # 8. 반·시간표 관리 [수정 12]
 elif menu == MENU_CLASS:
