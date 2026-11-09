@@ -349,6 +349,8 @@ def mock_total(r, l, g, total):
     """[수정 49] 모의고사 총점 정하기 — 과목 점수는 아는 것만, 모르면 빈칸
     돌려주는 값: (총점, 문제 있을 때 안내 문구)"""
     filled = [x for x in (r, l, g) if x is not None]
+    if total is not None and filled and sum(filled) == 0:
+        filled = []          # 총점은 있는데 과목이 전부 0 → 모르는 것으로 봄
     if total is None:
         if len(filled) == 3:
             return sum(filled), ""
@@ -1721,6 +1723,8 @@ elif menu == MENU_SCORE:
             if not cat:
                 ss.sc_msg = "시험 이름을 입력해 주세요."
                 return
+            if ss.get("mk_total") is not None and not any((r_, l_, g_)):
+                r_, l_, g_ = None, None, None      # 과목이 모두 0/빈칸이면 '모름'으로 저장
             total, err = mock_total(r_, l_, g_, ss.get("mk_total"))
             if err:
                 ss.sc_msg = err
@@ -1784,7 +1788,7 @@ elif menu == MENU_SCORE:
             ss.flash = f"📁 {cat} {ss.et_score:g}/{ss.et_max:g}점 저장했어요."
             reset({"et_score": None, "et_fb": ""})
 
-        for k, v in {"mk_r": 0.0, "mk_l": 0.0, "mk_g": 0.0, "mk_pct": None,
+        for k, v in {"mk_r": None, "mk_l": None, "mk_g": None, "mk_total": None, "mk_pct": None,
                      "ns_score": None, "ns_obj": None, "ns_essay": None, "et_score": None}.items():
             ss.setdefault(k, v)
 
@@ -1996,6 +2000,8 @@ elif menu == MENU_SCORE:
                 do_del = b2.form_submit_button("삭제")
             mk_err = ""
             if do_save and rtype == "모의고사":
+                if ed_tot_in is not None and not any((ed_r, ed_l, ed_g)):
+                    ed_r, ed_l, ed_g = None, None, None
                 ed_score, mk_err = mock_total(ed_r, ed_l, ed_g, ed_tot_in)
             if do_save:
                 if mk_err:
