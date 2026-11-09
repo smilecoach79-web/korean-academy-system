@@ -139,6 +139,23 @@ def init_db():
                 memo TEXT DEFAULT ''
             );
         """))
+        # [수정 56] 학생 할 일: 개별 보강 · 재시험 · 과제 재제출 같은 '학생과의 약속'
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS student_tasks (
+                id SERIAL PRIMARY KEY,
+                member_id INTEGER REFERENCES members (id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,             -- '개별 보강' / '재시험' / '과제 재제출' / '기타'
+                due_date TEXT NOT NULL,
+                start_time TEXT,
+                memo TEXT DEFAULT '',
+                class_id INTEGER REFERENCES classes (id) ON DELETE SET NULL,
+                origin_date TEXT,               -- 개별 보강이면 결석했던 날
+                done BOOLEAN DEFAULT FALSE,
+                done_date TEXT
+            );
+        """))
+        # [수정 57] 개별 보강 방식 (대면 / 동영상 / 자료 제공)
+        conn.execute(text("ALTER TABLE student_tasks ADD COLUMN IF NOT EXISTS method TEXT DEFAULT '';"))
         # [수정 25] 출결과 함께 과제 검사 결과 (완료 / 미흡 / 안 함)
         conn.execute(text("ALTER TABLE attendance ADD COLUMN IF NOT EXISTS homework_status TEXT DEFAULT '';"))
         # [수정 19] 수업 일지: 반 + 날짜마다 수업 내용, 과제, 제출일
@@ -749,6 +766,136 @@ def student_button(member_id, name, key):
     st.button(f"👤 {name} 학생 종합 조회 →", key=key, on_click=go_student, args=(member_id,), type="primary")
 
 
+TASK_KINDS = ["개별 보강", "재시험", "과제 재제출", "기타"]
+TASK_ICONS = {"개별 보강": "🙋", "재시험": "📝", "과제 재제출": "📚", "기타": "📌"}
+MK_METHODS = ["대면", "동영상", "자료 제공"]                      # [수정 57] 개별 보강 방식
+MK_ICONS = {"대면": "🙋", "동영상": "🎬", "자료 제공": "📄"}
+
+
+def task_title(kind, method):
+    """'🎬 개별 보강 · 동영상'처럼 종류와 방식을 한 번에"""
+    m_ = sv(method)
+    if kind == "개별 보강" and m_:
+        return f"{MK_ICONS.get(m_, '🙋')} 개별 보강 · {m_}"
+    return f"{TASK_ICONS.get(kind, '📌')} {kind}"
+
+
+def load_tasks(where_sql="", params=None):
+    """[수정 56] 학생 할 일 불러오기"""
+    with engine.connect() as conn:
+        return pd.read_sql_query(text(f"""
+            SELECT t.id, t.member_id, m.name, m.group_name, t.kind, COALESCE(t.method, '') AS method,
+                   t.due_date, t.start_time, t.memo,
+                   t.class_id, COALESCE(c.name, '') AS class_name, t.origin_date, t.done, t.done_date
+            FROM student_tasks t JOIN members m ON m.id = t.member_id
+            LEFT JOIN classes c ON c.id = t.class_id
+            {where_sql}
+            ORDER BY t.due_date, t.start_time NULLS LAST, t.id
+        """), conn, params=params or {})
+
+
+def josa(word, with_batchim, without_batchim):
+    """한글 조사 고르기: josa('보강', '을', '를') → '보강을' / 로·으로는 ㄹ받침도 '로'"""
+    last = next((ch for ch in reversed(str(word)) if "가" <= ch <= "힣"), None)
+    if last is None:
+        return f"{word}{without_batchim}"
+    jong = (ord(last) - 0xAC00) % 28
+    if with_batchim == "으로":
+        return f"{word}{'로' if jong in (0, 8) else '으로'}"
+    return f"{word}{with_batchim if jong else without_batchim}"
+
+
+def _d_label(d_str):
+    d_ = datetime.strptime(d_str, "%Y-%m-%d").date()
+    return f"{d_.month}/{d_.day}({WEEKDAYS[d_.weekday()]})"
+
+
+def task_done(task_id):
+    """완료 표시 — 개별 보강이면 결석했던 날 출결을 '보강완료'로"""
+    msg = "✅ 완료로 표시했어요."
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT kind, member_id, class_id, origin_date FROM student_tasks WHERE id = :i"),
+                           {"i": int(task_id)}).fetchone()
+        conn.execute(text("UPDATE student_tasks SET done = TRUE, done_date = :d WHERE id = :i"),
+                     {"d": str(today_kst()), "i": int(task_id)})
+        if row and row.kind == "개별 보강" and row.origin_date:
+            sql = "UPDATE attendance SET status = '보강완료' WHERE member_id = :m AND event_date = :o AND status = '결석'"
+            prm = {"m": row.member_id, "o": row.origin_date}
+            if row.class_id is not None:
+                sql += " AND class_id = :c"
+                prm["c"] = row.class_id
+            if conn.execute(text(sql), prm).rowcount:
+                msg += f" {_d_label(row.origin_date)} 결석이 '보강완료'로 바뀌었어요."
+    st.session_state["flash"] = msg
+
+
+def task_undo(task_id):
+    """완료 되돌리기 — 개별 보강이면 '보강완료'를 다시 '결석'으로"""
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT kind, member_id, class_id, origin_date FROM student_tasks WHERE id = :i"),
+                           {"i": int(task_id)}).fetchone()
+        conn.execute(text("UPDATE student_tasks SET done = FALSE, done_date = NULL WHERE id = :i"), {"i": int(task_id)})
+        if row and row.kind == "개별 보강" and row.origin_date:
+            sql = "UPDATE attendance SET status = '결석' WHERE member_id = :m AND event_date = :o AND status = '보강완료'"
+            prm = {"m": row.member_id, "o": row.origin_date}
+            if row.class_id is not None:
+                sql += " AND class_id = :c"
+                prm["c"] = row.class_id
+            conn.execute(text(sql), prm)
+    st.session_state["flash"] = "↩️ 완료를 되돌렸어요."
+
+
+def task_move(task_id, date_key):
+    """날짜 미루기"""
+    nd = st.session_state.get(date_key)
+    if not nd:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE student_tasks SET due_date = :d WHERE id = :i"), {"d": str(nd), "i": int(task_id)})
+    st.session_state["flash"] = f"📅 날짜를 {josa(f'{nd.month}/{nd.day}({WEEKDAYS[nd.weekday()]})', '으로', '로')} 옮겼어요."
+
+
+def task_delete(task_id):
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM student_tasks WHERE id = :i"), {"i": int(task_id)})
+    st.session_state["flash"] = "🗑️ 할 일을 취소했어요."
+
+
+def task_cards(df, kp, show_student=True):
+    """[수정 56] 할 일 카드: 완료 · 미루기 · 취소 (· 학생 화면으로)"""
+    t_ = today_kst()
+    for r in df.itertuples():
+        d_ = datetime.strptime(r.due_date, "%Y-%m-%d").date()
+        gap = (t_ - d_).days
+        when = ("오늘" if gap == 0 else (f"<span style='color:#d33'>⚠️ {gap}일 지남</span>" if gap > 0 else "")) \
+            + f" {d_.month}/{d_.day}({WEEKDAYS[d_.weekday()]})" + (f" {sv(r.start_time)}" if sv(r.start_time) else "")
+        with st.container(border=True):
+            who = f"{r.name} ({sv(r.group_name, '소속 없음')}) · " if show_student else ""
+            ic_, _, tx_ = task_title(r.kind, r.method).partition(" ")
+            st.markdown(f"{ic_} **{who}{tx_}** · {when}", unsafe_allow_html=True)
+            sub = []
+            if sv(r.origin_date):
+                sub.append(f"{_d_label(r.origin_date)} {sv(r.class_name)} 결석분".replace("  ", " "))
+            elif sv(r.class_name):
+                sub.append(sv(r.class_name))
+            if sv(r.memo):
+                sub.append(sv(r.memo))
+            if sub:
+                st.caption(md(" · ".join(sub)))
+            cs = st.columns([1, 1, 1, 1.2] if show_student else [1, 1, 1])
+            cs[0].button("✅ 완료", key=f"{kp}_tdone_{r.id}", on_click=task_done, args=(r.id,), type="primary",
+                         width="stretch")
+            with cs[1].popover("📅 미루기", width="stretch"):
+                st.date_input("새 날짜", value=max(d_, t_) + timedelta(days=1), key=f"{kp}_tmv_{r.id}")
+                st.button("이 날로 옮기기", key=f"{kp}_tmvb_{r.id}", on_click=task_move, args=(r.id, f"{kp}_tmv_{r.id}"))
+            with cs[2].popover("🗑️ 취소", width="stretch"):
+                st.caption("이 할 일을 지울까요?")
+                st.button("네, 지워요", key=f"{kp}_tdel_{r.id}", on_click=task_delete, args=(r.id,))
+            if show_student:
+                cs[3].button("👤 학생 →", key=f"{kp}_tstu_{r.id}", on_click=go_student, args=(int(r.member_id),),
+                             width="stretch")
+
+
 def load_followups(until_date):
     """[수정 30] 아직 안 한 '다시 연락' 약속 (until_date까지, None이면 전부)"""
     with engine.connect() as conn:
@@ -1022,6 +1169,17 @@ if menu == MENU_TODAY:
                 student_button(ra["member_id"], ra["이름"], "go_stu_att")
 
     with col_r:
+        # [수정 56] 오늘(과 밀린) 학생 할 일
+        tasks_due = load_tasks("WHERE NOT t.done AND t.due_date <= :d", {"d": t_str})
+        n_task_soon = len(load_tasks("WHERE NOT t.done AND t.due_date > :d AND t.due_date <= :w",
+                                     {"d": t_str, "w": str(t + timedelta(days=7))}))
+        if not tasks_due.empty:
+            n_late = int((tasks_due["due_date"] < t_str).sum())
+            st.subheader(f"📌 오늘 학생 할 일 {len(tasks_due)}건" + (f" (밀린 것 {n_late})" if n_late else ""))
+            task_cards(tasks_due, "today")
+        if n_task_soon:
+            st.caption(f"📌 앞으로 일주일 안에 학생 할 일 {n_task_soon}건이 있어요. (학생 화면에서 볼 수 있어요)")
+
         # [수정 30] 오늘(과 지난) 연락할 일
         due = load_followups(t)
         soon = load_followups(t + timedelta(days=7))
@@ -1479,6 +1637,48 @@ elif menu == MENU_ATT:
                     hw_txt = hw_summary(edited)
                     st.success(f"{cname} {bdate} 출결 저장 완료 · " + ", ".join(f"{k} {v}명" for k, v in counts.items())
                                + (f"  |  과제: {hw_txt}" if hw_txt else ""))
+
+            # ----- [수정 56] 결석생 개별 보강 잡기 -----
+            with engine.connect() as conn:
+                absent_df = pd.read_sql_query(text("""
+                    SELECT a.member_id, m.name, a.status FROM attendance a JOIN members m ON m.id = a.member_id
+                    WHERE a.class_id = :c AND a.event_date = :d AND a.status IN ('결석', '보강완료') ORDER BY m.name
+                """), conn, params={"c": cid, "d": str(bdate)})
+            if not absent_df.empty:
+                mk_tasks = load_tasks("WHERE t.kind = '개별 보강' AND t.origin_date = :d AND t.class_id = :c",
+                                      {"d": str(bdate), "c": cid})
+                st.markdown(f"#### 🙋 {bdate.month}/{bdate.day} 결석생 개별 보강")
+                st.caption("보강 날을 잡아 두면 그날 '오늘' 화면에 떠요. 보강 후 '완료'를 누르면 이 날 출결이 '보강완료'로 바뀌어요.")
+                for ab in absent_df.itertuples():
+                    has = mk_tasks[mk_tasks["member_id"] == ab.member_id]
+                    if not has.empty:
+                        h_ = has.iloc[0]
+                        mth_ = sv(h_["method"])
+                        state_ = ("✅ 보강 완료" if bool(h_["done"]) else "📌 보강 잡힘") + (f" ({MK_ICONS.get(mth_, '')} {mth_})" if mth_ else "")
+                        st.markdown(f"**{ab.name}** · {state_} · {_d_label(h_['due_date'])}"
+                                    + (f" {sv(h_['start_time'])}" if sv(h_['start_time']) else "")
+                                    + (f" · {md(sv(h_['memo']))}" if sv(h_['memo']) else ""))
+                    elif ab.status == "보강완료":
+                        st.markdown(f"**{ab.name}** · ✅ 보강완료로 기록됨")
+                    else:
+                        with st.form(f"mk_form_{cid}_{bdate}_{ab.member_id}", border=True):
+                            st.markdown(f"**{ab.name}** · 결석 → 개별 보강 잡기")
+                            x0, x1, x2, x3 = st.columns([1.3, 1, 0.9, 1.6])
+                            mk_w = x0.radio("방식", MK_METHODS, horizontal=True, key=f"mkw_{cid}_{bdate}_{ab.member_id}",
+                                            help="동영상·자료는 보낸 날이나 '확인할 날'로 날짜를 잡으세요.")
+                            mk_d = x1.date_input("날짜", value=max(bdate, today_kst()) + timedelta(days=1))
+                            mk_t = x2.time_input("시간 (선택)", value=None, step=300)
+                            mk_m = x3.text_input("메모 (선택)", placeholder="보강 내용, 영상·자료 이름 등")
+                            if st.form_submit_button("📌 개별 보강 잡기", type="primary"):
+                                with engine.begin() as conn:
+                                    conn.execute(text("""
+                                        INSERT INTO student_tasks (member_id, kind, method, due_date, start_time, memo, class_id, origin_date)
+                                        VALUES (:m, '개별 보강', :w, :d, :t, :mm, :c, :o)
+                                    """), {"m": int(ab.member_id), "w": mk_w, "d": str(mk_d),
+                                           "t": mk_t.strftime("%H:%M") if mk_t else None, "mm": mk_m.strip(),
+                                           "c": cid, "o": str(bdate)})
+                                st.session_state["flash"] = f"📌 {ab.name} {mk_w} 보강을 {josa(f'{mk_d.month}/{mk_d.day}({WEEKDAYS[mk_d.weekday()]})', '으로', '로')} 잡았어요."
+                                st.rerun()
 
             # ----- [수정 19] 수업 내용 · 과제 -----
             st.markdown(f"#### 📖 {bdate.strftime('%m월 %d일')}({WEEKDAYS[bdate.weekday()]}) 수업 내용 · 과제")
@@ -2397,6 +2597,61 @@ elif menu == MENU_PORTFOLIO:
                             for mm in cm_.itertuples():
                                 st.button(f"👤 {mm.name}", key=f"mate_{r.id}_{mm.id}", on_click=go_student,
                                           args=(mm.id,), width="stretch")
+                st.divider()
+
+                # [수정 56] 이 학생의 할 일 (개별 보강 · 재시험 · 과제 재제출)
+                stu_tasks = load_tasks("WHERE t.member_id = :m", {"m": int(selected_id)})
+                open_t = stu_tasks[~stu_tasks["done"].astype(bool)]
+                done_t = stu_tasks[stu_tasks["done"].astype(bool)].sort_values("done_date", ascending=False)
+                st.subheader(f"📌 할 일 {len(open_t)}건" if len(open_t) else "📌 할 일")
+                mk_done = done_t[done_t["kind"] == "개별 보강"]
+                if len(mk_done):   # [수정 57] 보강을 어떤 방식으로 했는지 모아 보기
+                    parts_ = [f"{w} {int((mk_done['method'] == w).sum())}" for w in MK_METHODS if (mk_done["method"] == w).sum()]
+                    st.caption(f"지금까지 개별 보강 {len(mk_done)}회" + (f" ({' · '.join(parts_)})" if parts_ else ""))
+                if open_t.empty:
+                    st.caption("남은 할 일이 없어요.")
+                else:
+                    task_cards(open_t, "pf", show_student=False)
+                ta1, ta2 = st.columns(2)
+                with ta1.expander("➕ 할 일 추가 (개별 보강 · 재시험 · 과제 재제출)"):
+                    absences = pd.read_sql_query(text("""
+                        SELECT a.event_date, a.class_id, COALESCE(c.name, '') AS cname FROM attendance a
+                        LEFT JOIN classes c ON c.id = a.class_id
+                        WHERE a.member_id = :m AND a.status = '결석' ORDER BY a.event_date DESC LIMIT 20
+                    """), conn, params={"m": int(selected_id)})
+                    ab_opts = {"(결석한 날과 연결하지 않음)": (None, None)}
+                    for ab in absences.itertuples():
+                        ab_opts[f"{_d_label(ab.event_date)} {ab.cname} 결석"] = (ab.event_date, ab.class_id)
+                    with st.form(f"task_add_{selected_id}"):
+                        y1, y2, y3 = st.columns(3)
+                        nk = y1.selectbox("종류", TASK_KINDS)
+                        nw = st.radio("보강 방식 (개별 보강일 때)", MK_METHODS, horizontal=True)
+                        nd_ = y2.date_input("날짜", value=today_kst() + timedelta(days=1))
+                        nt_ = y3.time_input("시간 (선택)", value=None, step=300)
+                        nab = st.selectbox("결석한 날 (개별 보강일 때)", list(ab_opts.keys()),
+                                           help="고르면 보강 완료 때 그날 출결이 '보강완료'로 바뀌어요.")
+                        nm_ = st.text_input("메모", placeholder="예: 관동별곡 어휘 OX 재시험, 교재 p.45~52 다시 풀기")
+                        if st.form_submit_button("📌 할 일 저장", type="primary"):
+                            o_d, o_c = ab_opts[nab] if nk == "개별 보강" else (None, None)
+                            with engine.begin() as conn2:
+                                conn2.execute(text("""
+                                    INSERT INTO student_tasks (member_id, kind, method, due_date, start_time, memo, class_id, origin_date)
+                                    VALUES (:m, :k, :w, :d, :t, :mm, :c, :o)
+                                """), {"m": int(selected_id), "k": nk, "w": nw if nk == "개별 보강" else "", "d": str(nd_),
+                                       "t": nt_.strftime("%H:%M") if nt_ else None, "mm": nm_.strip(),
+                                       "c": int(o_c) if o_c is not None and not pd.isna(o_c) else None, "o": o_d})
+                            st.session_state["flash"] = (f"📌 {m_info['name']} {josa(nk, '을', '를')} "
+                                                         f"{josa(f'{nd_.month}/{nd_.day}({WEEKDAYS[nd_.weekday()]})', '으로', '로')} 잡았어요.")
+                            st.rerun()
+                with ta2.expander(f"✅ 완료한 할 일 {len(done_t)}건"):
+                    if done_t.empty:
+                        st.caption("아직 완료한 할 일이 없어요.")
+                    for r in done_t.head(15).itertuples():
+                        z1, z2 = st.columns([3, 1])
+                        z1.markdown(md(f"{task_title(r.kind, r.method)} · {_d_label(r.due_date)}"
+                                       + (f" · {sv(r.memo)}" if sv(r.memo) else "")
+                                       + (f" · 완료 {_d_label(r.done_date)}" if sv(r.done_date) else "")))
+                        z2.button("↩️ 되돌리기", key=f"pf_tundo_{r.id}", on_click=task_undo, args=(r.id,), width="stretch")
                 st.divider()
 
                 col_att, col_score = st.columns([1, 1.4])
@@ -3357,5 +3612,26 @@ elif menu == MENU_BACKUP:
         label="📥 보강·휴강 일정 CSV 다운로드",
         data=csv_bytes(df_exp_events),
         file_name=f"국어학원_보강휴강_{today_kst()}.csv",
+        mime="text/csv"
+    )
+
+    st.divider()
+
+    # [수정 56] 학생 할 일 백업
+    st.subheader("8️⃣ 학생 할 일 (개별 보강 · 재시험 · 과제 재제출)")
+    with engine.connect() as conn:
+        df_exp_tasks = pd.read_sql_query("""
+            SELECT t.due_date AS 날짜, t.start_time AS 시간, m.name AS 이름, t.kind AS 종류,
+                   COALESCE(t.method, '') AS 보강방식, t.memo AS 메모,
+                   COALESCE(c.name, '') AS 반, t.origin_date AS 결석한날,
+                   CASE WHEN t.done THEN '완료' ELSE '남음' END AS 상태, t.done_date AS 완료일
+            FROM student_tasks t JOIN members m ON m.id = t.member_id LEFT JOIN classes c ON c.id = t.class_id
+            ORDER BY t.due_date DESC
+        """, conn)
+    st.dataframe(df_exp_tasks.fillna(""), hide_index=True, width="stretch")
+    st.download_button(
+        label="📥 학생 할 일 CSV 다운로드",
+        data=csv_bytes(df_exp_tasks),
+        file_name=f"국어학원_학생할일_{today_kst()}.csv",
         mime="text/csv"
     )
