@@ -1155,7 +1155,8 @@ elif menu == MENU_MEMBERS:
                 p1, p2 = st.columns([2, 1])
                 p1.text_input("학부모 연락처", placeholder="010-0000-0000", key="new_parent")
                 p2.selectbox("관계", PARENT_RELS, key="new_parent_rel")
-                st.text_input("기본 메모 (취약 영역, 목표 등급/대학)", key="new_notes")
+                st.text_area("기본 메모 (취약 영역, 목표 등급/대학)", key="new_notes", height=90,
+                             help="Enter로 줄을 바꿀 수 있어요.")
                 st.checkbox("동명이인이 맞습니다 (같은 이름의 다른 학생)", key="new_dup_ok")
                 st.form_submit_button("등록하기", on_click=add_member_cb)
             if "add_msg" in st.session_state:
@@ -1194,7 +1195,7 @@ elif menu == MENU_MEMBERS:
                     edit_parent = ep1.text_input("학부모 연락처", value=sv(curr_info['parent_contact']))
                     cur_rel = sv(curr_info['parent_relation'], "-")
                     edit_rel = ep2.selectbox("관계", PARENT_RELS, index=PARENT_RELS.index(cur_rel) if cur_rel in PARENT_RELS else 0)
-                    edit_notes = st.text_input("기본 메모", value=sv(curr_info['notes']))
+                    edit_notes = st.text_area("기본 메모", value=sv(curr_info['notes']), height=90)
                     submit_edit = st.form_submit_button("수정사항 저장")
 
                     if submit_edit and not edit_name.strip():
@@ -1314,7 +1315,17 @@ elif menu == MENU_MEMBERS:
 
         st.caption(f"검색 결과: 총 **{len(filtered_df)}명** / 전체 {len(df_members_raw)}명")
         # [수정 11] 왼쪽 0,1,2 번호 칸 숨기고, 빈칸의 None은 비워서 표시
-        student_table(filtered_df.fillna(""), filtered_df["ID"].tolist(), filtered_df["이름"].tolist(), "member_list_tbl")
+        # [수정 52] 표 안에서는 줄바꿈을 ' / '로 이어 한 줄로, 고른 학생은 메모 전체를 아래에 펼침
+        show_df = filtered_df.fillna("").copy()
+        show_df["기본메모"] = [" / ".join(x for x in sv(v).splitlines() if x.strip()) for v in show_df["기본메모"]]
+        ev_mem = student_table(show_df, filtered_df["ID"].tolist(), filtered_df["이름"].tolist(), "member_list_tbl",
+                               hint="👆 맨 왼쪽 네모 칸을 누르면 메모 전체를 볼 수 있고, 학생 페이지로도 갈 수 있어요.")
+        if ev_mem.selection.rows and ev_mem.selection.rows[0] < len(filtered_df):
+            sel_row = filtered_df.iloc[ev_mem.selection.rows[0]]
+            if sv(sel_row["기본메모"]).strip():
+                with st.container(border=True):
+                    st.markdown(f"**📝 {sel_row['이름']} 기본 메모**")
+                    st.markdown(md(sv(sel_row["기본메모"]).strip()).replace("\n", "  \n"))
 
 # 2. 출결 체크
 elif menu == MENU_ATT:
@@ -2301,7 +2312,9 @@ elif menu == MENU_PORTFOLIO:
                 """), {"id": selected_id}).scalar()
                 rel_ = sv(m_info.get("parent_relation"))
                 st.write(f"📞 학생 {sv(m_info['contact'], '-')}　|　👪 학부모{(' (' + rel_ + ')') if rel_ else ''} "
-                         f"{sv(m_info.get('parent_contact'), '-')}　|　📝 {sv(m_info['notes'], '-')}")
+                         f"{sv(m_info.get('parent_contact'), '-')}")
+                if sv(m_info["notes"]).strip():   # [수정 52] 메모는 줄바꿈을 살려 따로
+                    st.markdown("📝 " + md(sv(m_info["notes"]).strip()).replace("\n", "  \n"))
                 if last_parent:
                     gap_ = (today_kst() - datetime.strptime(last_parent, "%Y-%m-%d").date()).days
                     st.caption(f"마지막 학부모 연락: {last_parent[5:].replace('-', '/')} ({gap_}일 전)"
