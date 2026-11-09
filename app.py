@@ -2037,17 +2037,28 @@ elif menu == MENU_SCORE:
 
         st.divider()
         with st.expander("✏️/🗑️ 저장된 성적 찾아서 수정·삭제", expanded=False):
-            sc_edit = load_score_rows()
-            if sc_edit.empty:
+            with engine.connect() as conn:
+                n_all_sc = conn.execute(text("SELECT COUNT(*) FROM scores")).scalar()
+            if not n_all_sc:
                 st.info("저장된 성적이 없습니다.")
             else:
                 f1, f2 = st.columns([1, 2])
                 f_type = f1.selectbox("종류", ["전체"] + EXAM_TYPES, key="sc_edit_type")
                 f_kw = f2.text_input("학생 이름 / 시험 이름 검색", key="sc_edit_kw")
-                view = sc_edit if f_type == "전체" else sc_edit[sc_edit["exam_type"] == f_type]
+                # [수정 55] 종류나 검색어를 정하면 최근 100건이 아니라 전체 기록에서 찾음
+                conds, prm = [], {}
+                if f_type != "전체":
+                    conds.append("COALESCE(s.exam_type, '모의고사') = :tp")
+                    prm["tp"] = f_type
                 if f_kw.strip():
-                    view = view[view["m_name"].str.contains(f_kw.strip(), na=False) |
-                                view["category"].str.contains(f_kw.strip(), na=False)]
+                    conds.append("(m.name ILIKE :kw OR COALESCE(s.category, '') ILIKE :kw)")
+                    prm["kw"] = f"%{f_kw.strip()}%"
+                searching = bool(conds)
+                sc_edit = load_score_rows(("WHERE " + " AND ".join(conds)) if conds else "", prm,
+                                          5000 if searching else 100)
+                view = sc_edit
+                st.caption(f"찾은 성적 {len(view)}건" if searching else
+                           f"최근 {len(view)}건을 보여 줘요. 종류를 고르거나 이름으로 검색하면 지난 기록 전체에서 찾아요.")
                 if view.empty:
                     st.caption("조건에 맞는 성적이 없습니다.")
                 else:
@@ -2228,15 +2239,21 @@ elif menu == MENU_LOG:
 
         with col_lg_edit:
             with st.expander("✏️/🗑️ 상담 기록 찾아서 수정·삭제", expanded=False):
-                logs_for_edit = load_log_rows()
-                if logs_for_edit.empty:
+                with engine.connect() as conn:
+                    n_all_lg = conn.execute(text("SELECT COUNT(*) FROM logs")).scalar()
+                if not n_all_lg:
                     st.info("수정할 상담 일지가 없습니다.")
                 else:
                     lg_kw = st.text_input("학생 이름 / 주제 검색", key="lg_edit_kw")
-                    view_lg = logs_for_edit
+                    # [수정 55] 검색하면 최근 100건이 아니라 전체에서 찾음
                     if lg_kw.strip():
-                        view_lg = view_lg[view_lg["name"].str.contains(lg_kw.strip(), na=False) |
-                                          view_lg["topic"].str.contains(lg_kw.strip(), na=False)]
+                        logs_for_edit = load_log_rows("WHERE m.name ILIKE :kw OR COALESCE(l.topic, '') ILIKE :kw",
+                                                      {"kw": f"%{lg_kw.strip()}%"}, 5000)
+                        st.caption(f"찾은 기록 {len(logs_for_edit)}건")
+                    else:
+                        logs_for_edit = load_log_rows()
+                        st.caption(f"최근 {len(logs_for_edit)}건을 보여 줘요. 이름이나 주제로 검색하면 지난 기록 전체에서 찾아요.")
+                    view_lg = logs_for_edit
                     if view_lg.empty:
                         st.caption("조건에 맞는 기록이 없어요.")
                     else:
