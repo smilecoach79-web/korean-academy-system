@@ -802,6 +802,35 @@ def student_table(df_show, member_ids, names, key, hint="👆 맨 왼쪽 네모 
     return ev
 
 
+def pick_member(m_df, key, label):
+    """[수정 53] 학교·학년 / 수강반으로 좁혀서 학생 고르기 (m_df: id, name, group_name, status)
+    - 이름이 같은 학생이 있을 때만 번호를 붙여 구분"""
+    with engine.connect() as conn:
+        cm = pd.read_sql_query("""
+            SELECT cm.member_id, c.name FROM class_members cm JOIN classes c ON c.id = cm.class_id
+            WHERE c.active ORDER BY c.name
+        """, conn)
+    groups = sorted({sv(g) for g in m_df["group_name"] if sv(g)})
+    cls_names = sorted(set(cm["name"]))
+    f1, f2 = st.columns(2)   # 좁은 칸에서도 안 잘리게: 거르는 칸 2개 위, 학생 칸은 아래 한 줄로
+    g_sel = f1.selectbox("학교·학년", ["전체"] + groups, key=f"{key}_grp")
+    c_sel = f2.selectbox("수강반", ["전체"] + cls_names, key=f"{key}_cls")
+    view = m_df
+    if g_sel != "전체":
+        view = view[view["group_name"].fillna("") == g_sel]
+    if c_sel != "전체":
+        view = view[view["id"].isin(set(cm[cm["name"] == c_sel]["member_id"]))]
+    view = view.sort_values("name")
+    if view.empty:
+        st.selectbox(label, ["조건에 맞는 학생이 없어요"], key=f"{key}_none", disabled=True)
+        return None
+    dup = set(m_df["name"][m_df["name"].duplicated()])
+    lab = {int(r["id"]): (f"{r['name']} ({sv(r['group_name'], '소속 없음')})"
+                          + (f" · #{int(r['id'])}" if r["name"] in dup else "")
+                          + (" · 퇴원" if sv(r.get("status")) == "퇴원" else "")) for _, r in view.iterrows()}
+    return st.selectbox(f"{label} ({len(lab)}명)", list(lab.keys()), format_func=lambda i: lab[i], key=f"{key}_sel")
+
+
 def hw_summary(df, col="과제"):
     """과제 검사 결과를 '완료 3 · 미흡 1 · 안 함 1' 형태로"""
     if df is None or df.empty or col not in df:
@@ -1166,14 +1195,12 @@ elif menu == MENU_MEMBERS:
     with col_edit:
         with st.expander("✏️ 학생 정보 수정", expanded=False):
             with engine.connect() as conn:
-                m_list_edit = pd.read_sql_query("SELECT id, name, group_name FROM members ORDER BY id ASC", conn)
+                m_list_edit = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
 
+            target_edit_id = None if m_list_edit.empty else pick_member(m_list_edit, "edit_pick", "수정할 학생")
             if m_list_edit.empty:
                 st.info("등록된 학생이 없습니다.")
-            else:
-                edit_options = {f"{row['name']} ({sv(row['group_name'], '소속 없음')}) · ID {row['id']}": row['id'] for _, row in m_list_edit.iterrows()}
-                target_edit_label = st.selectbox("수정할 대상 선택", list(edit_options.keys()), key="edit_selector")
-                target_edit_id = edit_options[target_edit_label]
+            elif target_edit_id is not None:
 
                 with engine.connect() as conn:
                     curr_info = pd.read_sql_query(text("SELECT * FROM members WHERE id = :id"), conn, params={"id": target_edit_id}).iloc[0]
@@ -1220,16 +1247,10 @@ elif menu == MENU_MEMBERS:
             with engine.connect() as conn:
                 m_list = pd.read_sql_query("SELECT id, name, group_name, status FROM members ORDER BY id ASC", conn)
 
+            target_id = None if m_list.empty else pick_member(m_list, "del_pick", "대상 학생")
             if m_list.empty:
                 st.info("등록된 인원이 없습니다.")
-            else:
-                # 동명이인 구분을 위해 ID를 함께 표시
-                del_options = {
-                    f"[{sv(row['status'], '재원')}] {row['name']} ({sv(row['group_name'], '소속 없음')}) · ID {row['id']}": row['id']
-                    for _, row in m_list.iterrows()
-                }
-                target_del_label = st.selectbox("대상 원생 선택", list(del_options.keys()), key="del_selector")
-                target_id = del_options[target_del_label]
+            elif target_id is not None:
 
                 st.caption("※ 퇴원 처리해도 과거 성적, 출결, 상담 기록은 안전하게 보존됩니다.")
                 col_b1, col_b2 = st.columns(2)
@@ -1273,7 +1294,7 @@ elif menu == MENU_MEMBERS:
                         with engine.begin() as conn:
                             # 출결·성적·상담·반 배정은 ON DELETE CASCADE로 함께 지워짐
                             conn.execute(text("DELETE FROM members WHERE id = :id"), {"id": int(target_id)})
-                        st.session_state.pop("del_selector", None)
+                        st.session_state.pop("del_pick_sel", None)
                         st.session_state["flash"] = f"🗑️ '{del_name}' (ID {target_id}) 학생을 삭제했어요."
                         st.rerun()
 
