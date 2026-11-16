@@ -732,6 +732,8 @@ def go_log_for(label, member_id=None, name=None):
 def go_score_for(label, member_id=None, name=None):
     """[수정 28] 학생이 미리 선택된 성적 입력 화면으로"""
     st.session_state["menu"] = MENU_SCORE
+    st.session_state.pop("sc_f_grp", None)     # [수정 58] 거르기를 풀어야 그 학생이 보임
+    st.session_state.pop("sc_f_cls", None)
     for k in ["mk_stu", "ns_stu", "et_stu"]:
         st.session_state[k] = label
     if member_id is not None:
@@ -1915,6 +1917,17 @@ elif menu == MENU_SCORE:
                 ss[k] = v
 
         # ---------- ① 모의고사 ----------
+        def next_student(key):
+            """[수정 58] 저장하면 (좁힌) 목록의 다음 학생으로 넘어감"""
+            opts_ = ss.get("_sc_opts") or []
+            cur_ = ss.get(key)
+            if cur_ in opts_ and opts_.index(cur_) + 1 < len(opts_):
+                nxt = opts_[opts_.index(cur_) + 1]
+                ss[key] = nxt
+                ss.flash = ss.get("flash", "") + f"  ➡️ 다음: {nxt.split('] ')[-1].split(' (ID')[0]}"
+            elif cur_ in opts_ and len(opts_) > 1:
+                ss.flash = ss.get("flash", "") + "  ✅ 목록의 마지막 학생이에요."
+
         def cb_mock():
             cat = ss.mk_cat.strip()
             # [수정 49] 아는 과목만 적고, 모르는 과목은 빈칸('-')으로
@@ -1940,6 +1953,7 @@ elif menu == MENU_SCORE:
             ss.flash = f"📊 {ss.mk_stu.split('] ')[-1].split(' (ID')[0]} · {cat} {total:g}점 저장했어요."
             # 시험 이름·날짜는 남겨 두고 점수 칸만 비워서, 다음 학생을 바로 입력할 수 있게
             reset({"mk_r": None, "mk_l": None, "mk_g": None, "mk_total": None, "mk_grade": "-", "mk_pct": None, "mk_wrong": "", "mk_fb": ""})
+            next_student("mk_stu")
 
         # ---------- ② 학교 내신 ----------
         def cb_school():
@@ -1965,6 +1979,7 @@ elif menu == MENU_SCORE:
             ss.flash = f"🏫 {ss.ns_stu.split('] ')[-1].split(' (ID')[0]} · {cat} {score:g}/{ss.ns_max:g}점 저장했어요."
             # 학기·과목·범위·학교 평균은 남겨 두고 학생별 칸만 비움
             reset({"ns_score": None, "ns_obj": None, "ns_essay": None, "ns_grade": "", "ns_wrong": "", "ns_fb": ""})
+            next_student("ns_stu")
 
         # ---------- ④ 기타 ----------
         def cb_etc():
@@ -1987,17 +2002,49 @@ elif menu == MENU_SCORE:
                               exam_scope=ss.et_scope.strip()))
             ss.flash = f"📁 {cat} {ss.et_score:g}/{ss.et_max:g}점 저장했어요."
             reset({"et_score": None, "et_fb": ""})
+            next_student("et_stu")
 
         for k, v in {"mk_r": None, "mk_l": None, "mk_g": None, "mk_total": None, "mk_pct": None,
                      "ns_score": None, "ns_obj": None, "ns_essay": None, "et_score": None}.items():
             ss.setdefault(k, v)
+
+        # [수정 58] 학교·학년 / 수강반으로 학생 목록 좁히기 (모의고사·내신·기타)
+        stu_opts = list(member_dict.keys())
+        if exam_type != "수업 테스트":
+            with engine.connect() as conn:
+                sc_cm = pd.read_sql_query("""
+                    SELECT cm.member_id, c.name FROM class_members cm JOIN classes c ON c.id = cm.class_id
+                    WHERE c.active ORDER BY c.name
+                """, conn)
+            sf1, sf2, sf3 = st.columns([1, 1, 1.2])
+            sc_groups = sorted({sv(g) for g in members["group_name"] if sv(g)})
+            g_f = sf1.selectbox("학교·학년으로 좁히기", ["전체"] + sc_groups, key="sc_f_grp")
+            c_f = sf2.selectbox("수강반으로 좁히기", ["전체"] + sorted(set(sc_cm["name"])), key="sc_f_cls")
+            allowed = set(members["id"])
+            if g_f != "전체":
+                allowed &= set(members[members["group_name"].fillna("") == g_f]["id"])
+            if c_f != "전체":
+                allowed &= set(sc_cm[sc_cm["name"] == c_f]["member_id"])
+            narrowed = [lb for lb, i in member_dict.items() if i in allowed]
+            if narrowed:
+                stu_opts = narrowed
+                if g_f != "전체" or c_f != "전체":
+                    sf3.markdown(f"<div style='padding-top:2.1rem;color:#5f6475'>👥 {len(narrowed)}명만 보여요</div>",
+                                 unsafe_allow_html=True)
+            else:
+                sf3.markdown("<div style='padding-top:2.1rem;color:#d33'>맞는 학생이 없어 전체를 보여요</div>",
+                             unsafe_allow_html=True)
+            ss["_sc_opts"] = stu_opts
+            stu_key = {"모의고사": "mk_stu", "학교 내신": "ns_stu", "기타": "et_stu"}[exam_type]
+            if ss.get(stu_key) not in stu_opts:
+                ss.pop(stu_key, None)
 
         st.markdown(f"#### {EXAM_ICONS[exam_type]} {exam_type} 기록")
 
         if exam_type == "모의고사":
             with st.form("form_mock"):
                 c1, c2 = st.columns([2, 1])
-                c1.selectbox("학생 선택", list(member_dict.keys()), key="mk_stu")
+                c1.selectbox(f"학생 선택 ({len(stu_opts)}명)", stu_opts, key="mk_stu")
                 c2.date_input("시험 일자", today_kst(), key="mk_date")
                 st.text_input("시험 이름 *", placeholder="시험 이름을 적어 주세요. (시행 월, 주관 기관 등)", key="mk_cat")
                 a, b, c, d = st.columns(4)
@@ -2021,7 +2068,7 @@ elif menu == MENU_SCORE:
         elif exam_type == "학교 내신":
             with st.form("form_school"):
                 c1, c2 = st.columns([2, 1])
-                c1.selectbox("학생 선택", list(member_dict.keys()), key="ns_stu")
+                c1.selectbox(f"학생 선택 ({len(stu_opts)}명)", stu_opts, key="ns_stu")
                 c2.date_input("시험 일자", today_kst(), key="ns_date")
                 t1, t2 = st.columns(2)
                 t1.selectbox("시험", SCHOOL_TERMS, index=3, key="ns_term")
@@ -2133,7 +2180,7 @@ elif menu == MENU_SCORE:
         else:  # 기타
             with st.form("form_etc"):
                 c1, c2 = st.columns([2, 1])
-                c1.selectbox("학생 선택", list(member_dict.keys()), key="et_stu")
+                c1.selectbox(f"학생 선택 ({len(stu_opts)}명)", stu_opts, key="et_stu")
                 c2.date_input("시험 일자", today_kst(), key="et_date")
                 st.text_input("시험 이름 *", placeholder="시험 이름을 적어 주세요.", key="et_cat")
                 st.text_input("범위 (선택)", key="et_scope")
