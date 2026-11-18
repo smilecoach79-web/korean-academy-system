@@ -346,6 +346,7 @@ def go_record_date(class_name, d_str):
     st.session_state["menu"] = MENU_ATT
     st.session_state["bulk_class"] = class_name
     st.session_state["bulk_date"] = datetime.strptime(d_str, "%Y-%m-%d").date()
+    st.session_state["_att_nav"] = True     # [수정 59] 버튼으로 왔으니 반·날짜를 그대로 둠
 
 
 def mark_no_class(class_id, d_str, kind, event_id, name):
@@ -686,6 +687,10 @@ with st.sidebar:
 if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"))
 
+# [수정 59] 바로 전 화면 기억: 출결 화면에 '새로' 들어온 것인지 알려고
+st.session_state["_prev_menu"] = st.session_state.get("_cur_menu")
+st.session_state["_cur_menu"] = st.session_state.get("menu")
+
 # [수정 41] 다른 메뉴로 옮겨 가면 '학생 화면으로 돌아가기'는 잊음
 if st.session_state.get("back_nav") and st.session_state["back_nav"][0] != st.session_state.get("menu"):
     st.session_state.pop("back_nav", None)
@@ -697,6 +702,7 @@ def go_class_attendance(class_name, class_id=None):
     st.session_state["menu"] = MENU_ATT
     st.session_state["bulk_class"] = class_name
     st.session_state["bulk_date"] = today_kst()
+    st.session_state["_att_nav"] = True
 
 
 # [수정 23] 어디서든 학생을 누르면 그 학생의 개인별 종합 조회로 이동
@@ -1536,6 +1542,21 @@ elif menu == MENU_ATT:
         else:
             cls_opts = {r["name"]: int(r["id"]) for _, r in classes_df.iterrows()}
             names = list(cls_opts.keys())
+            # [수정 59] 사이드바로 새로 들어오면 날짜는 늘 '오늘', 반은 지금 시각에 맞는 반
+            #   (예전 날짜가 남아 있다가 오늘 기록이 엉뚱한 날짜로 저장되는 일을 막음)
+            came_by_button = st.session_state.pop("_att_nav", False)
+            if not came_by_button and st.session_state.get("_prev_menu") != MENU_ATT:
+                st.session_state["bulk_date"] = today_kst()
+                ts_ = load_sessions(today_kst(), today_kst())
+                if not ts_.empty:
+                    ts_ = ts_[~ts_["canceled"].astype(bool)].sort_values("start_time")
+                if not ts_.empty:
+                    # 이미 시작했거나 30분 안에 시작하는 수업 중 가장 늦은 것, 없으면 오늘 첫 수업
+                    soon = (datetime.now(KST) + timedelta(minutes=30)).strftime("%H:%M")
+                    started = ts_[ts_["start_time"] <= soon]
+                    pick_ = (started.iloc[-1] if not started.empty else ts_.iloc[0])["name"]
+                    if pick_ in names:
+                        st.session_state["bulk_class"] = pick_
             # 처음 들어왔을 때는 오늘 수업이 있는 반을 먼저 골라 둠
             if st.session_state.get("bulk_class") not in names:
                 today_ids = set(sched_df[sched_df["weekday"] == today_kst().weekday()]["class_id"]) | set(today_mk["class_id"])
@@ -1547,6 +1568,9 @@ elif menu == MENU_ATT:
             b1, b2 = st.columns([2, 1])
             cname = b1.selectbox("반 선택", names, key="bulk_class")
             bdate = b2.date_input("수업 날짜", key="bulk_date")
+            if bdate != today_kst():   # [수정 59] 오늘이 아닌 날짜면 눈에 띄게
+                st.warning(f"📆 지금 **오늘이 아닌 {bdate.month}/{bdate.day}({WEEKDAYS[bdate.weekday()]})** 기록을 보고 있어요. "
+                           f"저장하면 이 날짜로 들어가요.")
             cid = cls_opts[cname]
 
             my_sched = sched_df[sched_df["class_id"] == cid]
