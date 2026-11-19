@@ -336,6 +336,15 @@ def find_missed_records(today, days=14):
         if (cid, d) in due_map and (cid, d) in att_map and att_map[(cid, d)][1] == 0:
             issues.append("📝 과제 검사")
         if issues:
+            # [수정 60] 같은 날 같은 반 수업이 둘(보강+정규)이면 한 줄로 합침 — 기록은 하루 단위라서
+            prev_ = next((x for x in rows if x["class_id"] == cid and x["date"] == d), None)
+            if prev_:
+                prev_["start_time"] = f"{prev_['start_time']} · {r.start_time}"
+                if prev_["kind"] != r.kind:
+                    prev_["kind"] = "보강+정규"
+                if r.kind == "보강" and r.event_id is not None and not pd.isna(r.event_id):
+                    prev_["event_id"] = r.event_id
+                continue
             rows.append(dict(date=d, class_id=cid, name=r.name, start_time=r.start_time, kind=r.kind,
                              event_id=r.event_id, issues=issues, hw=due_map.get((cid, d), "")))
     return pd.DataFrame(rows)
@@ -351,10 +360,11 @@ def go_record_date(class_name, d_str):
 
 def mark_no_class(class_id, d_str, kind, event_id, name):
     """'이 날 수업 없었음': 정규 수업이면 휴강으로 기록, 보강이면 보강 일정을 지움"""
+    has_ev = event_id is not None and not pd.isna(event_id)
     with engine.begin() as conn:
-        if kind == "보강" and event_id:
+        if kind in ("보강", "보강+정규") and has_ev:
             conn.execute(text("DELETE FROM class_events WHERE id = :id"), {"id": int(event_id)})
-        else:
+        if kind != "보강" or not has_ev:
             conn.execute(text("""
                 INSERT INTO class_events (class_id, event_date, kind, memo)
                 VALUES (:c, :d, '휴강', '놓친 기록에서 수업 없었음으로 처리')
@@ -1074,7 +1084,7 @@ if menu == MENU_TODAY:
                     md_ = datetime.strptime(mm.date, "%Y-%m-%d").date()
                     with st.container(border=True):
                         st.markdown(md(f"**{md_.month}/{md_.day}({WEEKDAYS[md_.weekday()]}) {mm.start_time}　{mm.name}**"
-                                       + ("　`🔁 보강`" if mm.kind == "보강" else "")))
+                                       + ("　`🔁 보강`" if mm.kind == "보강" else ("　`🔁 보강 포함`" if mm.kind == "보강+정규" else ""))))
                         st.caption("빠진 것: " + " · ".join(mm.issues)
                                    + (md(f"　|　검사할 과제: {mm.hw}") if "📝 과제 검사" in mm.issues and mm.hw else ""))
                         k1, k2, _k = st.columns([1, 1, 0.6])
